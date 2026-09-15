@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="km">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>រៀនគណិត — ReanMath</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="app__header">
+      <div class="app__title">
+        <span class="app__logo">ស</span>
+        <div>
+          <h1>រៀនគណិត</h1>
+          <p>ជំនួយប្រឡងបាក់ឌុប គណិតវិទ្យា ថ្នាក់ទី១២</p>
+        </div>
+      </div>
+    </header>
+
+    <main id="chat" class="chat">
+      <div class="msg msg--bot">
+        <div class="msg__bubble">
+          សួស្តី! ខ្ញុំគឺជាជំនួយការគណិតវិទ្យា។ សួរខ្ញុំអំពីលំហាត់ណាមួយក្នុងកម្មវិធីថ្នាក់ទី១២
+          ឬសំណួរប្រឡងបាក់ឌុបចាស់ៗបាន។
+        </div>
+      </div>
+    </main>
+
+    <form id="form" class="composer" autocomplete="off">
+      <textarea
+        id="input"
+        rows="1"
+        placeholder="វាយសំណួរគណិតវិទ្យារបស់អ្នកនៅទីនេះ..."
+        required
+      ></textarea>
+      <button type="submit" id="send">ផ្ញើ</button>
+    </form>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
