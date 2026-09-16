@@ -3,43 +3,111 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
   <title>រៀនគណិត — ReanMath</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>∑</text></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" crossorigin="anonymous" />
   <link rel="stylesheet" href="/static/style.css" />
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js" crossorigin="anonymous"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js" crossorigin="anonymous"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js" crossorigin="anonymous"></script>
+  <script defer src="/static/app.js"></script>
 </head>
 <body>
-  <div class="app">
-    <header class="app__header">
-      <div class="app__title">
-        <span class="app__logo">ស</span>
+  <div class="layout">
+    <aside class="sidebar" id="sidebar" aria-label="Documents and settings">
+      <div class="brand">
+        <span class="brand__logo" aria-hidden="true">ស</span>
         <div>
           <h1>រៀនគណិត</h1>
-          <p>ជំនួយប្រឡងបាក់ឌុប គណិតវិទ្យា ថ្នាក់ទី១២</p>
+          <p>ReanMath · គណិតវិទ្យាថ្នាក់ទី១២</p>
         </div>
       </div>
-    </header>
 
-    <main id="chat" class="chat">
-      <div class="msg msg--bot">
-        <div class="msg__bubble">
-          សួស្តី! ខ្ញុំគឺជាជំនួយការគណិតវិទ្យា។ សួរខ្ញុំអំពីលំហាត់ណាមួយក្នុងកម្មវិធីថ្នាក់ទី១២
-          ឬសំណួរប្រឡងបាក់ឌុបចាស់ៗបាន។
+      <section class="panel">
+        <h2>បញ្ចូលឯកសារ <span class="muted">Ingest</span></h2>
+        <form id="upload-form" class="stack">
+          <label class="dropzone" id="dropzone" for="file-input">
+            <input id="file-input" type="file" accept=".pdf,.md,.markdown,.txt" hidden />
+            <span class="dropzone__icon" aria-hidden="true">⇪</span>
+            <span id="dropzone-label">ទម្លាក់ឯកសារ ឬចុចជ្រើសរើស<br /><small>PDF · Markdown · TXT</small></span>
+          </label>
+          <button type="submit" class="btn btn--primary" id="upload-btn" disabled>Upload</button>
+        </form>
+
+        <details class="paste">
+          <summary>បិទភ្ជាប់អត្ថបទ <span class="muted">Paste text</span></summary>
+          <form id="paste-form" class="stack">
+            <input id="paste-name" type="text" maxlength="200" placeholder="ឈ្មោះឯកសារ (e.g. limits-notes.md)" required />
+            <textarea id="paste-text" rows="6" placeholder="អត្ថបទ ឬ Markdown ដែលមាន LaTeX $...$" required></textarea>
+            <button type="submit" class="btn">Ingest text</button>
+          </form>
+        </details>
+        <p class="status-line" id="ingest-status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <h2>ឯកសារ <span class="muted">Documents</span></h2>
+          <button type="button" class="btn btn--ghost btn--small" id="refresh-docs" title="Refresh">↻</button>
         </div>
+        <ul class="doc-list" id="doc-list"><li class="muted">Loading…</li></ul>
+      </section>
+
+      <section class="panel">
+        <h2>ការកំណត់ <span class="muted">Retrieval</span></h2>
+        <label class="field">
+          <span>Top-k <output id="top-k-value">5</output></span>
+          <input id="top-k" type="range" min="1" max="20" step="1" value="5" />
+        </label>
+        <label class="field">
+          <span>Score threshold <output id="threshold-value">0.75</output></span>
+          <input id="threshold" type="range" min="0" max="1" step="0.01" value="0.75" />
+        </label>
+        <label class="check">
+          <input id="retrieval-only" type="checkbox" />
+          <span>Retrieval only (no LLM call)</span>
+        </label>
+      </section>
+
+      <footer class="sidebar__footer">
+        <span class="pill" id="health-pill">connecting…</span>
+      </footer>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button type="button" class="btn btn--ghost" id="toggle-sidebar" aria-controls="sidebar" aria-expanded="false">☰</button>
+        <span class="topbar__title">ជំនួយការគណិតវិទ្យា</span>
+        <button type="button" class="btn btn--ghost btn--small" id="clear-chat">ជម្រះ Clear</button>
+      </header>
+
+      <div id="chat" class="chat" aria-live="polite">
+        <article class="msg msg--bot">
+          <div class="msg__bubble">
+            <p>សួស្តី! ខ្ញុំគឺជាជំនួយការគណិតវិទ្យាថ្នាក់ទី១២។ សួរខ្ញុំអំពីលំហាត់ ឬមេរៀនណាមួយ ដូចជា
+              $\lim_{x \to 0} \frac{\sin x}{x}$ ឬ $$\int_0^1 x^2\,dx$$</p>
+            <p class="muted">Ask in Khmer or English. Answers are grounded in the documents you ingest.</p>
+          </div>
+        </article>
       </div>
+
+      <form id="composer" class="composer" autocomplete="off">
+        <textarea id="prompt" rows="1" maxlength="4000"
+          placeholder="វាយសំណួរគណិតវិទ្យារបស់អ្នកនៅទីនេះ… (Enter ដើម្បីផ្ញើ, Shift+Enter ចុះបន្ទាត់)" required></textarea>
+        <button type="submit" class="btn btn--primary" id="send">ផ្ញើ</button>
+      </form>
     </main>
-
-    <form id="form" class="composer" autocomplete="off">
-      <textarea
-        id="input"
-        rows="1"
-        placeholder="វាយសំណួរគណិតវិទ្យារបស់អ្នកនៅទីនេះ..."
-        required
-      ></textarea>
-      <button type="submit" id="send">ផ្ញើ</button>
-    </form>
   </div>
 
-  <script src="/static/app.js"></script>
+  <template id="sources-template">
+    <details class="sources">
+      <summary></summary>
+      <ol class="sources__list"></ol>
+    </details>
+  </template>
 </body>
 </html>

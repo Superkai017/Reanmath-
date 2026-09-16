@@ -1,8 +1,41 @@
+x-app: &app
+  image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+  working_dir: /app
+  env_file: .env
+  environment:
+    # Keep the container's virtualenv separate from the host's .venv.
+    UV_PROJECT_ENVIRONMENT: /opt/venv
+    UV_LINK_MODE: copy
+    HF_HOME: /cache/huggingface
+    VECTOR_STORE_PATH: /app/storage/vector_index
+    DATA_DIR: /app/data
+  volumes:
+    - ./:/app
+    - uv-venv:/opt/venv
+    - uv-cache:/root/.cache/uv
+    - hf-cache:/cache/huggingface
+
 services:
-  qdrant:
-    image: qdrant/qdrant:latest
+  reanmath:
+    <<: *app
+    command: ["uv", "run", "--frozen", "--no-dev", "uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - ./qdrant_storage:/qdrant/storage
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+  # One-off corpus indexing: docker compose run --rm ingest
+  ingest:
+    <<: *app
+    profiles: ["tools"]
+    command: ["uv", "run", "--frozen", "--no-dev", "python", "scripts/ingest_corpus.py"]
+
+volumes:
+  uv-venv:
+  uv-cache:
+  hf-cache:
