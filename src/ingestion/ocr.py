@@ -1,13 +1,20 @@
-"""OCR for scanned PDF pages using Gemini vision.
+"""OCR for scanned PDF pages and images.
 
-Each page is sent to Gemini as its embedded scan image (or as a one-page PDF
-when the page is not a single image) and transcribed to Unicode Khmer with
-formulas in LaTeX. Transcripts are cached on disk by content hash, so
-re-ingesting a document never pays for the same page twice.
+Two engines share the page cache and concurrency logic in ``CachedPageOCR``:
+
+* ``GeminiPageOCR`` sends each page to Gemini vision (as its embedded scan
+  image, or as a one-page PDF when the page is not a single image) and gets
+  back Unicode Khmer with formulas in LaTeX.
+* ``KiriPageOCR`` (``src/ingestion/khmer_ocr.py``) runs the open-source Kiri
+  OCR model locally and keeps Khmer words only.
+
+Transcripts are cached on disk by content hash, so re-ingesting a document
+never pays for the same page twice.
 """
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import io
 import logging
 import os
@@ -63,6 +70,9 @@ class OCRError(RuntimeError):
     pass
 
 
+OCREngine = Literal["gemini", "kiri"]
+
+
 def page_payload(page: Any) -> PageImage:
     """The page's single scan image if it has one, else a one-page PDF."""
     try:
@@ -91,40 +101,27 @@ def clean_transcript(text: str) -> str:
     return text.strip()
 
 
-class GeminiPageOCR:
+class CachedPageOCR:
+    """Page cache, the auto/always decision and concurrent page transcription.
+
+    Subclasses implement ``_cache_key`` and ``_transcribe_uncached``.
+    """
+
+    engine: OCREngine
+    model: str
+
     def __init__(
         self,
-        api_key: str,
-        model: str,
         *,
         mode: Literal["auto", "always"] = "auto",
         min_chars: int = 20,
         cache_dir: str | Path | None = None,
-        concurrency: int = 4,
-        max_retries: int = 4,
-        thinking_level: str = "low",
-        timeout: float = 300.0,
-        client: Any = None,
+        concurrency: int = 1,
     ) -> None:
-        from google.genai import errors, types
-
-        self._types = types
-        self._errors = errors
-        if client is None:
-            from google import genai
-
-            client = genai.Client(
-                api_key=api_key, http_options=types.HttpOptions(timeout=int(timeout * 1000))
-            )
-        self._client = client
-        self.model = model
         self.mode = mode
         self.min_chars = min_chars
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self.concurrency = max(1, concurrency)
-        self.max_retries = max(0, max_retries)
-        self.thinking_level = thinking_level
-        self.max_output_tokens = 16000
         self._cache_lock = threading.Lock()
 
     def needs_ocr(self, extracted_text: str) -> bool:
@@ -133,13 +130,7 @@ class GeminiPageOCR:
     # -- cache ----------------------------------------------------------------
 
     def _cache_key(self, payload: PageImage) -> str:
-        # The model is deliberately not part of the key: a page transcribed by
-        # any model is reused, so a quota-limited run can be finished with another.
-        digest = hashlib.sha256()
-        for part in (OCR_PROMPT_VERSION, payload.mime_type):
-            digest.update(part.encode("utf-8") + b"\x00")
-        digest.update(payload.data)
-        return digest.hexdigest()
+        raise NotImplementedError
 
     def _cache_path(self, key: str) -> Path | None:
         return self.cache_dir / f"{key}.md" if self.cache_dir is not None else None
@@ -164,6 +155,106 @@ class GeminiPageOCR:
             except BaseException:
                 Path(temp_name).unlink(missing_ok=True)
                 raise
+
+    # -- transcription ----------------------------------------------------------
+
+    def _transcribe_uncached(self, payload: PageImage) -> tuple[str, bool]:
+        """Returns (transcript, truncated); raises ``OCRError`` on failure."""
+        raise NotImplementedError
+
+    def transcribe_page(self, payload: PageImage) -> tuple[str, bool]:
+        """Transcribe one page. Returns (transcript, truncated).
+
+        Complete transcripts are cached; truncated ones never are.
+        """
+        key = self._cache_key(payload)
+        cached = self._read_cache(key)
+        if cached is not None:
+            return cached, False
+        text, truncated = self._transcribe_uncached(payload)
+        if not truncated:
+            self._write_cache(key, text)
+        return text, truncated
+
+    def transcribe(self, payload: PageImage) -> str:
+        return self.transcribe_page(payload)[0]
+
+    def transcribe_pages(self, pages: dict[int, PageImage]) -> tuple[dict[int, str], list[str]]:
+        """Transcribe several pages concurrently.
+
+        Returns transcripts by page number, plus warnings for pages that
+        failed (a failed page never aborts the whole document).
+        """
+        results: dict[int, str] = {}
+        failures: dict[int, str] = {}
+        truncated: list[int] = []
+        if not pages:
+            return results, []
+        total = len(pages)
+        with ThreadPoolExecutor(max_workers=min(self.concurrency, total)) as pool:
+            futures = {pool.submit(self.transcribe_page, payload): number for number, payload in pages.items()}
+            for done, future in enumerate(as_completed(futures), start=1):
+                number = futures[future]
+                try:
+                    results[number], was_truncated = future.result()
+                    if was_truncated:
+                        truncated.append(number)
+                    logger.info("OCR page %d done (%d/%d)", number, done, total)
+                except OCRError as exc:
+                    failures[number] = str(exc)
+                    logger.error("OCR page %d failed: %s", number, exc)
+        warnings = []
+        if failures:
+            listed = ", ".join(str(number) for number in sorted(failures))
+            warnings.append(f"OCR failed for page(s) {listed}: {next(iter(failures.values()))}")
+        if truncated:
+            listed = ", ".join(str(number) for number in sorted(truncated))
+            warnings.append(f"OCR transcript may be incomplete for page(s) {listed} (output limit reached)")
+        return results, warnings
+
+
+class GeminiPageOCR(CachedPageOCR):
+    engine: OCREngine = "gemini"
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        mode: Literal["auto", "always"] = "auto",
+        min_chars: int = 20,
+        cache_dir: str | Path | None = None,
+        concurrency: int = 4,
+        max_retries: int = 4,
+        thinking_level: str = "low",
+        timeout: float = 300.0,
+        client: Any = None,
+    ) -> None:
+        from google.genai import errors, types
+
+        super().__init__(mode=mode, min_chars=min_chars, cache_dir=cache_dir, concurrency=concurrency)
+        self._types = types
+        self._errors = errors
+        if client is None:
+            from google import genai
+
+            client = genai.Client(
+                api_key=api_key, http_options=types.HttpOptions(timeout=int(timeout * 1000))
+            )
+        self._client = client
+        self.model = model
+        self.max_retries = max(0, max_retries)
+        self.thinking_level = thinking_level
+        self.max_output_tokens = 16000
+
+    def _cache_key(self, payload: PageImage) -> str:
+        # The model is deliberately not part of the key: a page transcribed by
+        # any Gemini model is reused, so a quota-limited run can be finished with another.
+        digest = hashlib.sha256()
+        for part in (OCR_PROMPT_VERSION, payload.mime_type):
+            digest.update(part.encode("utf-8") + b"\x00")
+        digest.update(payload.data)
+        return digest.hexdigest()
 
     # -- transcription ----------------------------------------------------------
 
@@ -212,71 +303,64 @@ class GeminiPageOCR:
             time.sleep(delay)
         raise AssertionError("unreachable")
 
-    def transcribe_page(self, payload: PageImage) -> tuple[str, bool]:
-        """Transcribe one page. Returns (transcript, truncated).
-
-        Complete transcripts are cached. A transcript cut off by the output
-        limit is retried once with a larger limit and never cached.
-        """
-        key = self._cache_key(payload)
-        cached = self._read_cache(key)
-        if cached is not None:
-            return cached, False
-
+    def _transcribe_uncached(self, payload: PageImage) -> tuple[str, bool]:
+        # A transcript cut off by the output limit is retried once with a larger limit.
         text, truncated = self._request_with_retries(payload, self.max_output_tokens)
         if truncated:
             logger.info("OCR transcript hit the output limit; retrying with a larger limit")
             text, truncated = self._request_with_retries(payload, self.max_output_tokens * 4)
-        if not truncated:
-            self._write_cache(key, text)
         return text, truncated
 
-    def transcribe(self, payload: PageImage) -> str:
-        return self.transcribe_page(payload)[0]
 
-    def transcribe_pages(self, pages: dict[int, PageImage]) -> tuple[dict[int, str], list[str]]:
-        """Transcribe several pages concurrently.
-
-        Returns transcripts by page number, plus warnings for pages that
-        failed (a failed page never aborts the whole document).
-        """
-        results: dict[int, str] = {}
-        failures: dict[int, str] = {}
-        truncated: list[int] = []
-        if not pages:
-            return results, []
-        total = len(pages)
-        with ThreadPoolExecutor(max_workers=min(self.concurrency, total)) as pool:
-            futures = {pool.submit(self.transcribe_page, payload): number for number, payload in pages.items()}
-            for done, future in enumerate(as_completed(futures), start=1):
-                number = futures[future]
-                try:
-                    results[number], was_truncated = future.result()
-                    if was_truncated:
-                        truncated.append(number)
-                    logger.info("OCR page %d done (%d/%d)", number, done, total)
-                except OCRError as exc:
-                    failures[number] = str(exc)
-                    logger.error("OCR page %d failed: %s", number, exc)
-        warnings = []
-        if failures:
-            listed = ", ".join(str(number) for number in sorted(failures))
-            warnings.append(f"OCR failed for page(s) {listed}: {next(iter(failures.values()))}")
-        if truncated:
-            listed = ", ".join(str(number) for number in sorted(truncated))
-            warnings.append(f"OCR transcript may be incomplete for page(s) {listed} (output limit reached)")
-        return results, warnings
+def kiri_available() -> bool:
+    return importlib.util.find_spec("kiri_ocr") is not None
 
 
-def build_ocr(settings: Settings) -> GeminiPageOCR | None:
+def resolve_ocr_engine(settings: Settings) -> OCREngine | None:
+    """The engine OCR_ENGINE selects, or None when no engine is usable.
+
+    ``auto`` prefers Gemini (it also transcribes formulas as LaTeX) and falls
+    back to the local Kiri model when no Gemini key is configured.
+    """
+    if settings.ocr_engine == "gemini":
+        if settings.gemini_api_key is None:
+            raise RuntimeError("OCR_ENGINE=gemini requires GEMINI_API_KEY")
+        return "gemini"
+    if settings.ocr_engine == "kiri":
+        if not kiri_available():
+            raise RuntimeError("OCR_ENGINE=kiri requires kiri-ocr (uv add kiri-ocr)")
+        return "kiri"
+    if settings.gemini_api_key is not None:
+        return "gemini"
+    if kiri_available():
+        return "kiri"
+    return None
+
+
+def build_ocr(settings: Settings) -> CachedPageOCR | None:
     """The configured OCR engine, or None when OCR is disabled/unavailable."""
     if settings.ocr_mode == "never":
         return None
-    if settings.gemini_api_key is None:
+    engine = resolve_ocr_engine(settings)
+    if engine is None:
         if settings.ocr_mode == "always":
-            raise RuntimeError("OCR_MODE=always requires GEMINI_API_KEY")
-        logger.info("GEMINI_API_KEY not set; scanned PDF pages will not be OCR'd")
+            raise RuntimeError("OCR_MODE=always needs GEMINI_API_KEY or kiri-ocr")
+        logger.info("No OCR engine available; scanned pages and images will not be OCR'd")
         return None
+    if engine == "kiri":
+        from src.ingestion.khmer_ocr import KiriPageOCR
+
+        return KiriPageOCR(
+            settings.kiri_model,
+            mode=settings.ocr_mode,
+            min_chars=settings.ocr_min_chars,
+            cache_dir=settings.ocr_cache_dir,
+            device=settings.kiri_device,
+            decode_method=settings.kiri_decode_method,
+            min_confidence=settings.kiri_min_confidence,
+            khmer_only=settings.kiri_khmer_only,
+            render_scale=settings.kiri_render_scale,
+        )
     return GeminiPageOCR(
         settings.gemini_api_key.get_secret_value(),
         settings.ocr_model,

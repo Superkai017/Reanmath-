@@ -76,7 +76,7 @@ class IngestResponse(BaseModel):
     formulas_protected: int
     characters: int
     pages: int | None = None
-    ocr_pages: int = Field(0, description="PDF pages transcribed with Gemini vision OCR")
+    ocr_pages: int = Field(0, description="PDF pages or images transcribed by OCR (Gemini or Kiri)")
     warnings: list[str] = Field(default_factory=list)
     total_chunks: int
 
@@ -112,11 +112,13 @@ class HealthResponse(BaseModel):
     embedding_loaded: bool
     khmer_segmenter: str
     ocr_enabled: bool
+    ocr_engine: Literal["gemini", "kiri"] | None = None
     ocr_model: str | None = None
     llm_provider: Literal["anthropic", "gemini", "none"]
     llm_model: str | None = None
     default_top_k: int
     default_score_threshold: float
+    max_upload_mb: int
     documents: int
     chunks: int
 

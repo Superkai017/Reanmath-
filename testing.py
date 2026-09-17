@@ -80,6 +80,7 @@ def _isolated_environment(monkeypatch):
     for name in (
         "LLM_PROVIDER", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
         "EMBEDDING_BACKEND", "EMBEDDING_MODEL", "EMBED_MODEL", "VECTOR_STORE_PATH", "OCR_MODE",
+        "OCR_ENGINE",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -114,13 +115,14 @@ def test_health_matches_schema(client):
     assert health.llm_provider == "none" and health.llm_model is None
     assert (health.documents, health.chunks) == (0, 0)
     assert health.default_top_k == 5
-    assert health.ocr_enabled is False and health.ocr_model is None
+    assert health.ocr_enabled is False and health.ocr_model is None and health.ocr_engine is None
+    assert health.max_upload_mb == 1
 
 
 def test_frontend_is_served(client):
     page = client.get("/")
     assert page.status_code == 200
-    assert "រៀនគណិត" in page.text
+    assert "bondus" in page.text
     assert "katex" in page.text
     for asset in ("/static/app.js", "/static/style.css"):
         assert client.get(asset).status_code == 200
@@ -406,7 +408,8 @@ def test_scanned_pdf_upload_is_ocr_transcribed(store_path, tmp_path):
     client = FakeGeminiClient(["ដេរីវេនៃ $\\sin x$ គឺ $\\cos x$ ។"])
     ocr = GeminiPageOCR("key", "gemini-test", client=client, cache_dir=tmp_path / "ocr")
     with TestClient(create_app(make_settings(store_path), ocr=ocr)) as client_app:
-        assert client_app.get("/health").json()["ocr_model"] == "gemini-test"
+        health = client_app.get("/health").json()
+        assert (health["ocr_engine"], health["ocr_model"]) == ("gemini", "gemini-test")
         response = client_app.post(
             "/api/ingest", files={"file": ("scan.pdf", make_pdf([""]), "application/pdf")}
         )
@@ -417,3 +420,39 @@ def test_scanned_pdf_upload_is_ocr_transcribed(store_path, tmp_path):
         sources = client_app.post("/api/query", json={"prompt": "ដេរីវេនៃ sin x"}).json()["sources"]
         assert sources[0]["page"] == 1
         assert "$\\cos x$" in sources[0]["text"]
+
+
+def test_image_upload_is_ocr_transcribed_by_kiri(store_path, tmp_path):
+    from src.ingestion.khmer_ocr import KiriPageOCR
+
+    class FakeKiri:
+        def __init__(self, **options):
+            pass
+
+        def process_document(self, image_path, mode="lines"):
+            return [
+                {"box": [0, 0, 100, 20], "text": "ដេរីវេនៃអនុគមន៍ f(x)", "confidence": 0.9},
+                {"box": [0, 40, 100, 20], "text": "គឺជាលីមីត ។", "confidence": 0.9},
+            ]
+
+    ocr = KiriPageOCR(engine_factory=FakeKiri, cache_dir=tmp_path / "ocr")
+    with TestClient(create_app(make_settings(store_path), ocr=ocr)) as client_app:
+        health = client_app.get("/health").json()
+        assert (health["ocr_enabled"], health["ocr_engine"]) == (True, "kiri")
+
+        response = client_app.post(
+            "/api/ingest", files={"file": ("lesson.png", b"\x89PNG image", "image/png")}
+        )
+        assert response.status_code == 200, response.text
+        result = IngestResponse.model_validate(response.json())
+        assert (result.format, result.pages, result.ocr_pages) == ("image", 1, 1)
+
+        sources = client_app.post("/api/query", json={"prompt": "ដេរីវេនៃអនុគមន៍"}).json()["sources"]
+        assert sources[0]["source"] == "lesson.png"
+        assert sources[0]["text"] == "ដេរីវេនៃអនុគមន៍\nគឺជាលីមីត ។"
+
+
+def test_image_upload_without_ocr_is_rejected(client):
+    response = client.post("/api/ingest", files={"file": ("photo.jpg", b"jpeg bytes", "image/jpeg")})
+    assert response.status_code == 422
+    assert "Image uploads need OCR" in response.json()["detail"]

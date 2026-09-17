@@ -33,7 +33,7 @@ from schemas import (
     QueryResponse,
     SourceChunk,
 )
-from src.config import STATIC_DIR, Settings, get_settings
+from src.config import FRONTEND_DIR, Settings, get_settings
 from src.embeddings.embedder import Embedder, build_embedder
 from src.ingestion import (
     DuplicateSourceError,
@@ -48,7 +48,7 @@ from src.ingestion import (
 )
 from src.ingestion.extract import clean_markdown, detect_format
 from src.ingestion.khmer_segment import KhmerSegmenter, detect_language
-from src.ingestion.ocr import GeminiPageOCR, build_ocr
+from src.ingestion.ocr import CachedPageOCR, build_ocr
 from src.retrieval.retriever import RetrievedChunk, Retriever
 from src.vectorstore import EmbeddingMismatchError, InMemoryVectorStore
 
@@ -282,7 +282,7 @@ class RAGState:
     retriever: Retriever
     segmenter: KhmerSegmenter
     generator: AnswerGenerator
-    ocr: GeminiPageOCR | None
+    ocr: CachedPageOCR | None
     write_lock: asyncio.Lock
 
 
@@ -291,7 +291,7 @@ def build_state(
     *,
     embedder: Embedder | None = None,
     generator: AnswerGenerator | None = None,
-    ocr: GeminiPageOCR | None = None,
+    ocr: CachedPageOCR | None = None,
 ) -> RAGState:
     embedder = embedder or build_embedder(settings)
     try:
@@ -394,7 +394,7 @@ def create_app(
     *,
     embedder: Embedder | None = None,
     generator: AnswerGenerator | None = None,
-    ocr: GeminiPageOCR | None = None,
+    ocr: CachedPageOCR | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     logging.basicConfig(
@@ -435,7 +435,7 @@ def create_app(
 
     @app.get("/", include_in_schema=False)
     async def index() -> FileResponse:
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(FRONTEND_DIR / "index.html")
 
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     async def health(request: Request) -> HealthResponse:
@@ -448,11 +448,13 @@ def create_app(
             embedding_loaded=state.embedder.is_loaded,
             khmer_segmenter=settings.khmer_segmenter,
             ocr_enabled=state.ocr is not None,
+            ocr_engine=state.ocr.engine if state.ocr is not None else None,
             ocr_model=state.ocr.model if state.ocr is not None else None,
             llm_provider=state.generator.provider,
             llm_model=state.generator.model,
             default_top_k=settings.top_k,
             default_score_threshold=settings.score_threshold,
+            max_upload_mb=settings.max_upload_mb,
             documents=len(state.store.sources()),
             chunks=len(state.store),
         )
@@ -509,7 +511,7 @@ def create_app(
     @app.post("/api/ingest", response_model=IngestResponse, responses=ERROR_RESPONSES, tags=["ingest"])
     async def ingest(
         request: Request,
-        file: UploadFile | None = File(None, description="A .pdf, .md, .markdown or .txt file"),
+        file: UploadFile | None = File(None, description="A .pdf, .md, .markdown, .txt, .png, .jpg, .jpeg or .webp file"),
         text: str | None = Form(None, description="Raw text/Markdown, as an alternative to a file"),
         source_name: str | None = Form(None, max_length=200),
         replace: bool = Form(True),
@@ -533,7 +535,7 @@ def create_app(
             if not data:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "Uploaded file is empty")
             try:
-                # Scanned PDFs are OCR'd page by page here, which can take minutes.
+                # Scanned PDFs and images are OCR'd here, which can take minutes.
                 document = await run_in_threadpool(extract_document, data, filename, state.ocr)
             except ExtractionError as exc:
                 raise HTTPException(422, str(exc)) from exc
@@ -582,7 +584,7 @@ def create_app(
             await run_in_threadpool(state.store.save)
         return DeleteDocumentResponse(source=source, chunks_removed=removed, total_chunks=len(state.store))
 
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.mount("/static", StaticFiles(directory=FRONTEND_DIR / "static"), name="static")
     return app
 
 

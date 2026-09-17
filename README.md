@@ -2,7 +2,7 @@
 
 A local retrieval-augmented generation (RAG) tutor for the Cambodian Grade 12
 mathematics curriculum (Bac II, science stream). You ingest curriculum
-documents (PDF, Markdown, plain text). Students ask questions in Khmer or
+documents (PDF, images, Markdown, plain text). Students ask questions in Khmer or
 English, and answers are grounded in the retrieved passages, with LaTeX
 rendered in the browser.
 
@@ -22,7 +22,9 @@ The two properties that matter most:
 ```
 upload / data/  ──► extract.py ──► latex_guard.mask_latex ──► khmer_segment
                     (PDF pages,      (formulas → ⟦MATH_uuid⟧)    (NFC, ZWSP word
-                     Markdown, TXT)                              boundaries)
+                     images, MD,                                  boundaries)
+                     TXT; scans →
+                     Gemini or Kiri OCR)
                                                                      │
                      vectorstore (in-memory cosine index,     ◄── chunk.py
                      atomic index.npz on disk)                    (recursive splitter,
@@ -38,7 +40,7 @@ question ──► retriever.py (top-k, threshold, formula restoration)
              Claude (Anthropic) · Gemini · retrieval-only fallback
                               │
                               ▼
-             static/ UI (Markdown + KaTeX)
+             Frontend/ UI "bondus" (Markdown + KaTeX)
 ```
 
 | Path | Role |
@@ -46,14 +48,16 @@ question ──► retriever.py (top-k, threshold, formula restoration)
 | `src/config.py` | `pydantic-settings` configuration from `.env` |
 | `src/ingestion/latex_guard.py` | `mask_latex` / `unmask_latex` for `$…$`, `$$…$$`, `\(…\)`, `\[…\]`, math environments |
 | `src/ingestion/khmer_segment.py` | normalisation, CRF/regex word segmentation, Khmer/English detection |
-| `src/ingestion/extract.py` | PDF (per page), Markdown (syntax stripped, formulas kept) and text extraction |
-| `src/ingestion/ocr.py` | Gemini vision OCR for scanned PDF pages (Khmer + LaTeX), with retries and a page cache |
+| `src/ingestion/extract.py` | PDF (per page), image, Markdown (syntax stripped, formulas kept) and text extraction |
+| `src/ingestion/ocr.py` | OCR engine selection, shared page cache, and Gemini vision OCR (Khmer + LaTeX) with retries |
+| `src/ingestion/khmer_ocr.py` | Kiri OCR: local, open-source Khmer OCR that keeps Khmer words only |
 | `src/ingestion/chunk.py` | `RecursiveCharacterTextSplitter` aware of placeholders and Khmer boundaries |
 | `src/ingestion/__init__.py` | `prepare_document` / `index_document` pipeline with a formula-integrity check |
 | `src/embeddings/embedder.py` | sentence-transformers embedder (E5 prefixes handled) and offline hashing embedder |
 | `src/vectorstore/__init__.py` | in-memory cosine index with persistence and embedding-model checks |
 | `src/retrieval/retriever.py` | retrieval, context budgeting and retrieval metrics (hit rate, MRR, P@k, R@k) |
-| `src/api.py` | FastAPI app: `/api/query`, `/api/ingest`, `/api/documents`, `/health`, static UI |
+| `src/api.py` | FastAPI app: `/api/query`, `/api/ingest`, `/api/documents`, `/health`, and the web UI |
+| `Frontend/` | The web UI (`index.html`, `static/app.js`, `static/style.css`); plain HTML/JS, no build step |
 | `schemas.py` / `prompts.py` | API models and the tutor system prompt |
 | `scripts/ingest_corpus.py` | bulk indexing of `./data` |
 | `testing.py`, `src/tests/` | pytest suites |
@@ -92,6 +96,17 @@ Start the server and open <http://localhost:8000>:
 ```bash
 uv run uvicorn src.api:app --reload
 ```
+
+The UI in `Frontend/` is served by the same process, so there is nothing to
+build and no Node.js is needed. It offers:
+
+- a chat with Markdown and KaTeX rendering, collapsible sources (document,
+  page and score), copy, regenerate and stop;
+- `+` in the composer (or drag and drop) to add a PDF, image, Markdown or text
+  file to the knowledge base. Your next question then searches only the files
+  attached to it; remove the chip to search everything;
+- **Documents** in the sidebar to list and delete indexed documents;
+- recent conversations, saved in the browser's `localStorage`.
 
 Or with Docker:
 
@@ -143,20 +158,60 @@ important ones:
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `500` / `50` | Measured in displayed characters |
 | `TOP_K` / `SCORE_THRESHOLD` | `5` / `0.75` | Use a threshold around `0.2` with the hashing backend |
 | `KHMER_SEGMENTER` | `auto` | `crf` (khmer-nltk), `regex`, or `auto` |
-| `OCR_MODE` / `OCR_MODEL` | `auto` / `gemini-3.5-flash` | OCR of scanned PDF pages; see below |
+| `OCR_MODE` / `OCR_ENGINE` | `auto` / `auto` | OCR of scanned PDF pages and images; see below |
+| `OCR_MODEL` | `gemini-3.5-flash` | Gemini OCR model |
+| `KIRI_MIN_CONFIDENCE` / `KIRI_KHMER_ONLY` | `0.2` / `true` | Kiri OCR filtering |
 
-## Scanned PDFs (OCR)
+## Scanned PDFs and images (OCR)
 
-Pages with no usable text layer are sent to Gemini vision (`OCR_MODEL`, default
-`gemini-3.5-flash`), which transcribes Khmer to Unicode and writes formulas as
-LaTeX. This needs `GEMINI_API_KEY` and is on by default (`OCR_MODE=auto`).
+Pages with no usable text layer, and uploaded images (`.png`, `.jpg`, `.jpeg`,
+`.webp`), are read by OCR. `OCR_ENGINE` picks the engine:
+
+| Engine | What it produces | Needs |
+|---|---|---|
+| `gemini` | Khmer as Unicode **and** formulas as LaTeX | `GEMINI_API_KEY` |
+| `kiri` | **Khmer words only**; no formulas | nothing (runs locally on the CPU) |
+| `auto` (default) | `gemini` when `GEMINI_API_KEY` is set, otherwise `kiri` | |
+
+### Kiri OCR (Khmer words only)
+
+[Kiri OCR](https://github.com/mrrtmob/kiri-ocr) is an open-source Khmer/English
+OCR model. Set `OCR_ENGINE=kiri` to use it even when a Gemini key is present.
+The model (`KIRI_MODEL`) downloads from Hugging Face on first use.
+
+- Each page is split into text lines, and each line is recognised. Lines with
+  a confidence below `KIRI_MIN_CONFIDENCE` are dropped. The published model
+  scores even clean lines around 0.4–0.45, so the default is 0.2.
+- With `KIRI_KHMER_ONLY=true` (default) each line is reduced to its Khmer
+  words: Khmer letters, Khmer digits (០–៩) and Khmer punctuation (។ ៕). An
+  ASCII `:` inside a word is read back as `ៈ`, which Kiri often misreads. Latin
+  letters, Arabic digits and math symbols are removed, because Kiri cannot
+  read formulas and would index them as noise. Leftover dependent vowels at
+  the start of a word are removed too. The result is then word-segmented and
+  chunked like any other Khmer text.
+- PDF pages that are a single scanned image are passed to Kiri as-is; other
+  pages are rendered with pypdfium2 at `KIRI_RENDER_SCALE`.
+- Pages are processed one at a time. Expect a few seconds per page on a CPU
+  (`KIRI_DEVICE=cuda` if you have a GPU; `KIRI_DECODE_METHOD=fast` is quicker).
+
+Use Kiri for Khmer prose (lessons, explanations, exercise text). Use Gemini
+when the formulas on scanned pages matter.
+
+### Gemini OCR
+
+Gemini vision (`OCR_MODEL`, default `gemini-3.5-flash`) transcribes Khmer to
+Unicode and writes formulas as LaTeX.
+
+### Both engines
 
 - Each page transcript is cached in `storage/ocr_cache/<hash>.md`, so
-  re-ingesting costs nothing. Review these files to check OCR quality.
+  re-ingesting costs nothing. Review these files to check OCR quality. Kiri
+  and Gemini transcripts are cached separately, and changing a Kiri setting
+  creates new cache entries.
 - `OCR_MODE=always` also OCRs pages that have text, which helps with older PDFs
   whose legacy Khmer fonts extract as garbage.
-- Busy (429/503) responses are retried with backoff. A page that still fails
-  is skipped with a warning; the rest of the document is indexed.
+- Busy Gemini (429/503) responses are retried with backoff. A page that still
+  fails is skipped with a warning; the rest of the document is indexed.
 - Uploading a scanned PDF in the browser OCRs it during the request, which can
   take several minutes. For large files, prefer
   `uv run python scripts/ingest_corpus.py` (use `--no-ocr` to skip OCR).
@@ -165,6 +220,7 @@ LaTeX. This needs `GEMINI_API_KEY` and is on by default (`OCR_MODE=auto`).
 ## Limitations
 
 - OCR output can contain transcription mistakes, especially in dense formulas.
+  Kiri OCR drops formulas entirely by design.
   The tutor prompt tells the model to trust correct mathematics over a passage
   that looks wrong.
 - The index is held in memory. It suits a curriculum-sized corpus of tens of

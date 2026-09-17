@@ -15,10 +15,12 @@ dependencies = [
     "pypdf>=5.0",
     "sentence-transformers>=3.0",
     "torch>=2.3",
+    "torchvision>=0.18",
     "khmer-nltk>=1.6",
     "anthropic>=0.122",
     "google-genai>=1.0",
     "kiri-ocr>=0.2.15",
+    "pypdfium2>=4.30",
 ]
 
 [dependency-groups]
@@ -38,6 +40,9 @@ explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu", marker = "sys_platform != 'darwin'" }]
+# torchvision (pulled in by kiri-ocr) must come from the same index as torch,
+# or its compiled ops (torchvision::nms) fail to load.
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform != 'darwin'" }]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

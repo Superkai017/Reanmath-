@@ -650,17 +650,35 @@ class TestOCR:
         assert payload.mime_type == "application/pdf"
         assert PdfReader(io.BytesIO(payload.data)).pages[0].extract_text().strip() == "hello"
 
-    def test_build_ocr_respects_settings(self, tmp_path):
+    def test_build_ocr_respects_settings(self, tmp_path, monkeypatch):
+        import src.ingestion.ocr as ocr_module
         from src.config import Settings
         from src.ingestion.ocr import build_ocr
 
+        for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OCR_ENGINE", "OCR_MODE"):
+            monkeypatch.delenv(name, raising=False)
         base = dict(_env_file=None, ocr_cache_dir=tmp_path)
         assert build_ocr(Settings(**base, ocr_mode="never", gemini_api_key="k")) is None
+        with pytest.raises(RuntimeError):
+            build_ocr(Settings(**base, ocr_mode="auto", ocr_engine="gemini"))
+        engine = build_ocr(Settings(**base, ocr_mode="auto", gemini_api_key="k", ocr_model="m"))
+        assert engine is not None and engine.engine == "gemini"
+        assert engine.model == "m" and engine.cache_dir == tmp_path
+
+        # Without a Gemini key, "auto" falls back to Kiri when it is installed.
+        monkeypatch.setattr(ocr_module, "kiri_available", lambda: False)
         assert build_ocr(Settings(**base, ocr_mode="auto")) is None
         with pytest.raises(RuntimeError):
             build_ocr(Settings(**base, ocr_mode="always"))
-        engine = build_ocr(Settings(**base, ocr_mode="auto", gemini_api_key="k", ocr_model="m"))
-        assert engine is not None and engine.model == "m" and engine.cache_dir == tmp_path
+        with pytest.raises(RuntimeError):
+            build_ocr(Settings(**base, ocr_engine="kiri"))
+
+        monkeypatch.setattr(ocr_module, "kiri_available", lambda: True)
+        kiri = build_ocr(Settings(**base, ocr_mode="always", kiri_min_confidence=0.7))
+        assert kiri.engine == "kiri" and kiri.mode == "always" and kiri.min_confidence == 0.7
+        assert build_ocr(Settings(**base, ocr_engine="kiri")).min_confidence == 0.2
+        forced = build_ocr(Settings(**base, gemini_api_key="k", ocr_engine="kiri"))
+        assert forced.engine == "kiri" and forced.model == "mrrtmob/kiri-ocr"
 
     def test_ocr_chunks_are_tagged(self, tmp_path, embedder, regex_segmenter):
         ocr = _ocr(FakeGeminiClient([OCR_PAGE]), tmp_path)
@@ -716,3 +734,143 @@ def test_cache_is_shared_across_models(tmp_path):
     engine = GeminiPageOCR("k", "model-b", client=second, cache_dir=tmp_path)
     assert engine.transcribe(page) == "from model A"
     assert second.calls == []
+
+
+# ---------------------------------------------------------------------------
+# OCR (Kiri, local Khmer OCR, with a stand-in model)
+# ---------------------------------------------------------------------------
+
+class FakeKiriEngine:
+    """Mimics ``kiri_ocr.OCR.process_document``; records the image it was given."""
+
+    def __init__(self, results, **kwargs) -> None:
+        self.results = results
+        self.kwargs = kwargs
+        self.calls: list[tuple[bytes, str]] = []
+
+    def process_document(self, image_path, mode="lines"):
+        with open(image_path, "rb") as handle:
+            self.calls.append((handle.read(), mode))
+        return self.results
+
+
+def _kiri(tmp_path, results, **kwargs):
+    from src.ingestion.khmer_ocr import KiriPageOCR
+
+    engines: list[FakeKiriEngine] = []
+
+    def factory(**options):
+        engines.append(FakeKiriEngine(results, **options))
+        return engines[-1]
+
+    ocr = KiriPageOCR(engine_factory=factory, cache_dir=tmp_path / "ocr", **kwargs)
+    return ocr, engines
+
+
+def _region(text, y, confidence=0.95, x=0, h=20):
+    return {"box": [x, y, 100, h], "text": text, "confidence": confidence, "det_confidence": 0.9}
+
+
+class TestKiriOCR:
+    def test_keeps_khmer_words_only(self):
+        from src.ingestion.khmer_ocr import khmer_words_only
+
+        assert khmer_words_only("គណនា lim x→0 នៃ sin(3x)/x ។") == "គណនា នៃ ។"
+        assert khmer_words_only("លំហាត់ ១. f(x) = 2x + 1") == "លំហាត់ ១"
+        assert khmer_words_only("Exercise 1: (a) 2x + 3 = 0") == ""
+        assert khmer_words_only("។ x = 1") == "", "punctuation alone is not kept"
+        # A dependent vowel left behind by a dropped glyph cannot start a word.
+        assert khmer_words_only("xាក្យ") == "ក្យ"
+        # An ASCII colon inside a word is Kiri's reading of U+17C8.
+        assert khmer_words_only("រយ:ពេល ១៥០ នាទី") == "រយ\u17c8ពេល ១៥០ នាទី"
+        assert khmer_words_only("សម័យប្រឡង៖ ០៨ x: 1") == "សម័យប្រឡង៖ ០៨"
+        # Output is NFC and keeps subscripts (coeng) and Khmer digits intact.
+        assert khmer_words_only("ត្រីកោណមាត្រ ២០២៣") == "ត្រីកោណមាត្រ ២០២៣"
+        assert khmer_words_only(unicodedata.normalize("NFD", "ដេរីវេ")) == unicodedata.normalize("NFC", "ដេរីវេ")
+
+    def test_groups_regions_into_lines(self):
+        from src.ingestion.khmer_ocr import group_lines
+
+        regions = [_region("a", 10), _region("b", 14, x=120), _region("c", 60), _region("d", 100)]
+        assert [[r["text"] for r in line] for line in group_lines(regions)] == [["a", "b"], ["c"], ["d"]]
+        assert group_lines([]) == []
+
+    def test_image_is_transcribed_filtered_and_cached(self, tmp_path):
+        results = [
+            _region("លំហាត់ទី ១", 10),
+            _region("x² + 1", 12, x=150),
+            _region("គណនាដេរីវេ f(x) = x³", 50),
+            _region("មិនច្បាស់", 90, confidence=0.2),
+            _region("y = 2x", 130),
+        ]
+        ocr, engines = _kiri(tmp_path, results, min_confidence=0.5)
+        assert engines == [], "the model loads lazily"
+
+        document = extract_document(b"\x89PNG fake image", "photo.png", ocr=ocr)
+        assert document.format == "image" and document.pages == 1 and document.ocr_pages == 1
+        assert [(section.page, section.ocr) for section in document.sections] == [(1, True)]
+        assert document.sections[0].text == "លំហាត់ទី ១\nគណនាដេរីវេ"
+        assert document.warnings == []
+
+        engine = engines[0]
+        assert engine.kwargs == {"model_path": "mrrtmob/kiri-ocr", "device": "cpu", "decode_method": "accurate"}
+        assert engine.calls == [(b"\x89PNG fake image", "lines")]
+        assert len(list((tmp_path / "ocr").glob("*.md"))) == 1
+
+        again = extract_document(b"\x89PNG fake image", "photo.png", ocr=ocr)
+        assert again.sections[0].text == document.sections[0].text
+        assert len(engine.calls) == 1, "second extraction must be served from the cache"
+
+    def test_khmer_only_can_be_disabled_and_changes_the_cache_key(self, tmp_path):
+        from src.ingestion.ocr import PageImage
+
+        results = [_region("គណនា  f(x) = x", 10)]
+        page = PageImage(b"img", "image/jpeg")
+        khmer, _ = _kiri(tmp_path, results)
+        everything, _ = _kiri(tmp_path, results, khmer_only=False)
+        assert khmer.transcribe(page) == "គណនា"
+        assert everything.transcribe(page) == "គណនា f(x) = x"
+        assert khmer._cache_key(page) != everything._cache_key(page)
+
+    def test_cache_is_not_shared_with_gemini(self, tmp_path):
+        from src.ingestion.ocr import GeminiPageOCR, PageImage
+
+        page = PageImage(b"img", "image/png")
+        gemini = GeminiPageOCR("k", "m", client=FakeGeminiClient(["gemini"]), cache_dir=tmp_path / "ocr")
+        kiri, _ = _kiri(tmp_path, [_region("គីរី", 1)])
+        assert gemini._cache_key(page) != kiri._cache_key(page)
+
+    def test_scanned_pdf_page_is_rendered_for_kiri(self, tmp_path):
+        pytest.importorskip("pypdfium2")
+        ocr, engines = _kiri(tmp_path, [_region("ទំព័រស្កេន", 5)])
+        document = extract_document(make_pdf(["", "This page already has a proper text layer."]), "scan.pdf", ocr=ocr)
+        assert document.ocr_pages == 1
+        assert document.sections[0].text == "ទំព័រស្កេន"
+        image, _ = engines[0].calls[0]
+        assert image.startswith(b"\x89PNG"), "the PDF page is rendered to PNG"
+
+    def test_failures_become_warnings(self, tmp_path):
+        from src.ingestion.khmer_ocr import KiriPageOCR
+
+        def broken_factory(**options):
+            raise SystemExit(1)  # what kiri_ocr does on a model/vocab mismatch
+
+        ocr = KiriPageOCR(engine_factory=broken_factory, cache_dir=tmp_path)
+        document = extract_document(b"img", "page.jpg", ocr=ocr)
+        assert document.sections == []
+        assert any("Could not load Kiri OCR model" in warning for warning in document.warnings)
+
+        class Exploding(FakeKiriEngine):
+            def process_document(self, image_path, mode="lines"):
+                raise RuntimeError("bad image")
+
+        ocr = KiriPageOCR(engine_factory=lambda **options: Exploding([], **options), cache_dir=tmp_path)
+        document = extract_document(b"img", "page.webp", ocr=ocr)
+        assert any("Kiri OCR failed: bad image" in warning for warning in document.warnings)
+        assert not list(tmp_path.glob("*.md")), "failures are never cached"
+
+    def test_image_without_ocr_is_rejected(self):
+        with pytest.raises(ExtractionError, match="Image uploads need OCR"):
+            extract_document(b"img", "photo.jpeg", ocr=None)
+        with pytest.raises(UnsupportedFileTypeError):
+            extract_document(b"img", "photo.gif", ocr=None)
