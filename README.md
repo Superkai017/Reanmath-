@@ -19,6 +19,13 @@ The two properties that matter most:
 
 ## Architecture
 
+[![System flow: documents are extracted (with Gemini or Kiri OCR for scans), formulas are masked, Khmer is segmented, text is chunked and embedded into the vector store; a question is matched by the retriever, combined with the system prompt, answered by the LLM provider and shown in the bondus UI](system-flow-chart.png)](system-flow-chart.png)
+
+*Click the diagram to open it at full size.*
+
+<details>
+<summary>Text version</summary>
+
 ```
 upload / data/  ──► extract.py ──► latex_guard.mask_latex ──► khmer_segment
                     (PDF pages,      (formulas → ⟦MATH_uuid⟧)    (NFC, ZWSP word
@@ -42,6 +49,8 @@ question ──► retriever.py (top-k, threshold, formula restoration)
                               ▼
              Frontend/ UI "bondus" (Markdown + KaTeX)
 ```
+
+</details>
 
 | Path | Role |
 |---|---|
@@ -97,6 +106,13 @@ Start the server and open <http://localhost:8000>:
 uv run uvicorn src.api:app --reload
 ```
 
+Or with Docker:
+
+```bash
+docker compose up reanmath
+docker compose run --rm ingest     # index ./data inside the container
+```
+
 The UI in `Frontend/` is served by the same process, so there is nothing to
 build and no Node.js is needed. It offers:
 
@@ -137,13 +153,6 @@ graph can be panned and zoomed, and **PNG** downloads it.
 - Graphs need an LLM provider. In passage-only mode there are none.
 - GeoGebra is free for non-commercial use; check
   [its license](https://www.geogebra.org/license) before commercial use.
-
-Or with Docker:
-
-```bash
-docker compose up reanmath
-docker compose run --rm ingest     # index ./data inside the container
-```
 
 ### API
 
