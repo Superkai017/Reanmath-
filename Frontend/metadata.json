@@ -1,0 +1,6 @@
+{
+  "name": "bondus",
+  "description": "bondus - A minimalist, user-friendly AI mathematics assistant supporting Khmer and English, with real-time MathJax LaTeX rendering and clean ChatGPT-inspired design.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
