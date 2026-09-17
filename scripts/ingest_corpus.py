@@ -62,7 +62,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="extract and chunk only; do not embed or save (OCR still runs and is cached)",
     )
-    parser.add_argument("--no-ocr", action="store_true", help="skip Gemini OCR of scanned PDF pages")
+    parser.add_argument("--no-ocr", action="store_true", help="skip OCR of scanned PDF pages and images")
     parser.add_argument(
         "--extensions",
         nargs="+",
@@ -101,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     segmenter = KhmerSegmenter(settings.khmer_segmenter)
     ocr = None if args.no_ocr else build_ocr(settings)
     if ocr is not None:
-        logger.info("OCR: %s (mode=%s, cache=%s)", ocr.model, ocr.mode, ocr.cache_dir)
+        logger.info("OCR: %s %s (mode=%s, cache=%s)", ocr.engine, ocr.model, ocr.mode, ocr.cache_dir)
 
     if args.dry_run:
         total_chunks = total_formulas = 0

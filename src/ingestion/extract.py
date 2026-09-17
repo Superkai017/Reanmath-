@@ -19,6 +19,17 @@ SUPPORTED_EXTENSIONS: dict[str, str] = {
     ".md": "markdown",
     ".markdown": "markdown",
     ".pdf": "pdf",
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".webp": "image",
+}
+
+IMAGE_MIME_TYPES: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
 }
 
 
@@ -206,11 +217,30 @@ def extract_pdf(data: bytes, source: str, ocr: PageOCR | None = None) -> Extract
         hint = (
             "OCR returned no text for them"
             if ocr is not None
-            else "scanned pages need OCR; set GEMINI_API_KEY and OCR_MODE=auto"
+            else "scanned pages need OCR; set GEMINI_API_KEY or install kiri-ocr, with OCR_MODE=auto"
         )
         warnings.append(f"{empty} of {len(pages)} PDF page(s) had no text layer ({hint})")
     return ExtractedDocument(
         source, "pdf", sections, pages=len(pages), warnings=warnings, ocr_pages=len(ocr_pages)
+    )
+
+
+# --- Images -----------------------------------------------------------------
+
+def extract_image(data: bytes, filename: str, ocr: PageOCR | None) -> ExtractedDocument:
+    """A photo or scan of one page, transcribed by OCR as page 1."""
+    if ocr is None:
+        raise ExtractionError(
+            "Image uploads need OCR; set GEMINI_API_KEY or install kiri-ocr, and OCR_MODE must not be 'never'"
+        )
+    payload = PageImage(data, IMAGE_MIME_TYPES[Path(filename).suffix.lower()])
+    transcripts, warnings = ocr.transcribe_pages({1: payload})
+    text = clean_markdown(transcripts.get(1, ""))
+    sections = [Section(text, 1, ocr=True)] if text.strip() else []
+    if not sections and not warnings:
+        warnings.append("OCR found no text in the image")
+    return ExtractedDocument(
+        filename, "image", sections, pages=1, warnings=list(warnings), ocr_pages=len(sections)
     )
 
 
@@ -219,11 +249,13 @@ def extract_pdf(data: bytes, source: str, ocr: PageOCR | None = None) -> Extract
 def extract_document(data: bytes, filename: str, ocr: PageOCR | None = None) -> ExtractedDocument:
     """Extract text sections from raw file bytes, dispatching on extension.
 
-    ``ocr`` is only used for PDFs, on pages it reports as needing OCR.
+    ``ocr`` is used for images and for PDF pages it reports as needing OCR.
     """
     file_format = detect_format(filename)
     if file_format == "pdf":
         return extract_pdf(data, filename, ocr)
+    if file_format == "image":
+        return extract_image(data, filename, ocr)
 
     text = extract_markdown(data) if file_format == "markdown" else extract_plain_text(data)
     sections = [Section(text)] if text.strip() else []

@@ -9,11 +9,12 @@ from pydantic import AliasChoices, Field, SecretStr, field_validator, model_vali
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-STATIC_DIR = PROJECT_ROOT / "static"
+FRONTEND_DIR = PROJECT_ROOT / "Frontend"
 
 LLMProvider = Literal["auto", "anthropic", "gemini", "none"]
 EmbeddingBackend = Literal["sentence-transformers", "hashing"]
 KhmerSegmenterBackend = Literal["auto", "crf", "regex"]
+OCREngineSetting = Literal["auto", "gemini", "kiri"]
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
 
@@ -70,14 +71,23 @@ class Settings(BaseSettings):
     chunk_overlap: int = Field(50, ge=0)
     khmer_segmenter: KhmerSegmenterBackend = "auto"
 
-    # --- OCR for scanned PDFs (Gemini vision) ---
+    # --- OCR for scanned PDFs and images ---
     ocr_mode: Literal["auto", "always", "never"] = "auto"
+    ocr_engine: OCREngineSetting = "auto"
     ocr_model: str = "gemini-3.5-flash"
     ocr_min_chars: int = Field(20, ge=0)
     ocr_concurrency: int = Field(4, ge=1, le=32)
     ocr_max_retries: int = Field(4, ge=0, le=10)
     ocr_thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
     ocr_cache_dir: Path = PROJECT_ROOT / "storage" / "ocr_cache"
+
+    # Kiri OCR (local, open source; Khmer words only by default)
+    kiri_model: str = "mrrtmob/kiri-ocr"
+    kiri_device: str = "cpu"
+    kiri_decode_method: Literal["fast", "accurate", "beam"] = "accurate"
+    kiri_min_confidence: float = Field(0.2, ge=0.0, le=1.0)
+    kiri_khmer_only: bool = True
+    kiri_render_scale: float = Field(2.0, ge=0.5, le=6.0)
 
     # --- Retrieval ---
     top_k: int = Field(5, ge=1, le=50)

@@ -1,0 +1,14 @@
+{
+  "name": "bondus-frontend",
+  "private": true,
+  "version": "0.3.0",
+  "type": "module",
+  "description": "bondus web UI. The dev server proxies /api, /health and /docs to FastAPI on port 8000.",
+  "scripts": {
+    "dev": "vite",
+    "check": "node --check static/app.js"
+  },
+  "devDependencies": {
+    "vite": "^6.2.3"
+  }
+}

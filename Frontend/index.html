@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="km">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>bondus · Khmer Math Tutor</title>
+  <meta name="description" content="bondus - a minimalist Khmer and English math tutor grounded in the Grade 12 curriculum, with LaTeX rendering." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23171717'/%3E%3Ctext x='16' y='22' font-family='Georgia,serif' font-size='18' text-anchor='middle' fill='white'%3Eb%3C/text%3E%3C/svg%3E" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Kantumruy+Pro:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <!-- Markdown + LaTeX rendering (katex, marked, DOMPurify; pinned versions) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" crossorigin="anonymous" />
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js" crossorigin="anonymous"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js" crossorigin="anonymous"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js" crossorigin="anonymous"></script>
+
+  <link rel="stylesheet" href="/static/style.css" />
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <!-- Icon sprite -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" stroke="none"/></symbol>
+      <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></symbol>
+      <symbol id="i-edit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
+      <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5V5a2 2 0 0 1 2-2h14v16H6.5a2.5 2.5 0 0 0 0 5H20"/></symbol>
+      <symbol id="i-paperclip" viewBox="0 0 24 24"><path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6"/></symbol>
+      <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M6 10l6-6 6 6"/><path d="M4 20h16"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+      <symbol id="i-sigma" viewBox="0 0 24 24"><path d="M18 7V4H6l6 8-6 8h12v-3"/></symbol>
+    </defs>
+  </svg>
+
+  <div class="app" id="app">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar" aria-label="Sidebar">
+      <div class="sidebar-top">
+        <button class="brand" id="brand" type="button" title="New chat">bondus</button>
+        <button class="icon-btn" id="close-sidebar" type="button" title="Close sidebar" aria-label="Close sidebar">
+          <svg class="icon"><use href="#i-sidebar"/></svg>
+        </button>
+      </div>
+
+      <nav class="sidebar-nav">
+        <button class="nav-btn" id="new-chat" type="button">
+          <svg class="icon"><use href="#i-edit"/></svg><span>New chat</span>
+        </button>
+        <button class="nav-btn" id="open-library" type="button">
+          <svg class="icon"><use href="#i-book"/></svg><span>Documents</span>
+          <span class="nav-count" id="doc-count" hidden></span>
+        </button>
+      </nav>
+
+      <div class="recents">
+        <div class="recents-label">Recents</div>
+        <ul class="recents-list" id="recents"></ul>
+        <p class="recents-empty" id="recents-empty">Your conversations will appear here.</p>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="status" id="status" title="Backend status">
+          <span class="status-dot" id="status-dot"></span>
+          <span class="status-text" id="status-text">Connecting…</span>
+        </div>
+      </div>
+    </aside>
+    <div class="scrim" id="scrim" hidden></div>
+
+    <!-- Main -->
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn" id="open-sidebar" type="button" title="Open sidebar" aria-label="Open sidebar">
+          <svg class="icon"><use href="#i-sidebar"/></svg>
+        </button>
+        <div class="topbar-title" id="chat-title"></div>
+        <button class="icon-btn" id="topbar-new-chat" type="button" title="New chat" aria-label="New chat">
+          <svg class="icon"><use href="#i-edit"/></svg>
+        </button>
+      </header>
+
+      <section class="thread" id="thread" aria-live="polite">
+        <div class="thread-inner" id="messages"></div>
+      </section>
+
+      <!-- Empty state + composer -->
+      <div class="stage" id="stage">
+        <div class="hero" id="hero">
+          <h1 class="hero-title">What shall we solve today?</h1>
+          <p class="hero-sub">តើថ្ងៃនេះអ្នកចង់រៀន ឬដោះស្រាយលំហាត់អ្វី?</p>
+        </div>
+
+        <form class="composer" id="composer" autocomplete="off">
+          <div class="attachments" id="attachments"></div>
+          <textarea id="prompt" rows="1" maxlength="4000"
+            placeholder="Ask a math question in Khmer or English…"
+            aria-label="Your question"></textarea>
+          <div class="composer-bar">
+            <div class="composer-left">
+              <button class="icon-btn" id="attach" type="button" title="Add a document to the knowledge base (PDF, image, Markdown, text)" aria-label="Upload document">
+                <svg class="icon"><use href="#i-plus"/></svg>
+              </button>
+              <button class="icon-btn" id="toggle-symbols" type="button" title="Math symbols" aria-label="Math symbols" aria-pressed="false">
+                <svg class="icon"><use href="#i-sigma"/></svg>
+              </button>
+            </div>
+            <div class="composer-right">
+              <span class="char-count" id="char-count" hidden></span>
+              <button class="send-btn" id="send" type="submit" title="Send (Enter)" aria-label="Send" disabled>
+                <svg class="icon"><use href="#i-arrow-up"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="symbols" id="symbols" hidden>
+            <button type="button" data-insert="$\sqrt{x}$">√</button>
+            <button type="button" data-insert="$x^{2}$">x²</button>
+            <button type="button" data-insert="$\frac{a}{b}$">a⁄b</button>
+            <button type="button" data-insert="$\int_{a}^{b} f(x)\,dx$">∫</button>
+            <button type="button" data-insert="$\lim_{x \to 0}$">lim</button>
+            <button type="button" data-insert="$\sum_{k=1}^{n}$">Σ</button>
+            <button type="button" data-insert="$\pi$">π</button>
+            <button type="button" data-insert="$\theta$">θ</button>
+            <button type="button" data-insert="$\pm$">±</button>
+            <button type="button" data-insert="$\le$">≤</button>
+            <button type="button" data-insert="$\ge$">≥</button>
+            <button type="button" data-insert="$\infty$">∞</button>
+            <button type="button" data-insert="$\Delta$">Δ</button>
+          </div>
+          <input type="file" id="file-input" hidden multiple
+            accept=".pdf,.md,.markdown,.txt,.png,.jpg,.jpeg,.webp" />
+        </form>
+
+        <div class="suggestions" id="suggestions">
+          <button type="button" class="chip" data-prompt="គណនាលីមីត $\lim_{x \to 0} \frac{\sin 3x}{x}$">គណនាលីមីត</button>
+          <button type="button" class="chip" data-prompt="រកដេរីវេនៃអនុគមន៍ $f(x) = x^2 e^x$">រកដេរីវេ</button>
+          <button type="button" class="chip" data-prompt="Evaluate $\int_0^1 x e^{x}\,dx$ step by step">Integration by parts</button>
+          <button type="button" class="chip" data-prompt="ពន្យល់ពីចំនួនកុំផ្លិច និងទម្រង់ត្រីកោណមាត្រ">ចំនួនកុំផ្លិច</button>
+        </div>
+
+        <p class="footnote">Answers are grounded in your uploaded documents and can still contain mistakes.</p>
+      </div>
+
+      <div class="drop-overlay" id="drop-overlay" hidden>
+        <div class="drop-card">
+          <svg class="icon icon-lg"><use href="#i-upload"/></svg>
+          <p>Drop to add to your documents</p>
+          <span>PDF · PNG · JPG · WebP · Markdown · Text</span>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Documents dialog -->
+  <dialog class="dialog" id="library" aria-labelledby="library-title">
+    <div class="dialog-head">
+      <div>
+        <h2 id="library-title">Documents</h2>
+        <p class="dialog-sub" id="library-sub">The knowledge base answers are grounded in.</p>
+      </div>
+      <button class="icon-btn" type="button" id="close-library" aria-label="Close">
+        <svg class="icon"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <button class="dropzone" type="button" id="library-upload">
+      <svg class="icon icon-lg"><use href="#i-upload"/></svg>
+      <span class="dropzone-title">Upload or drop files</span>
+      <span class="dropzone-hint" id="library-hint">PDF, images, Markdown or text. Scanned pages are read with OCR.</span>
+    </button>
+    <ul class="doc-list" id="doc-list"></ul>
+    <p class="doc-empty" id="doc-empty" hidden>No documents yet.</p>
+  </dialog>
+
+  <div class="toasts" id="toasts" aria-live="assertive"></div>
+</body>
+</html>
