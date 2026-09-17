@@ -28,12 +28,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from src.ingestion.khmer_segment import looks_garbled
+
 if TYPE_CHECKING:
     from src.config import Settings
 
 logger = logging.getLogger(__name__)
 
-OCR_PROMPT_VERSION = "1"
+OCR_PROMPT_VERSION = "2"
 
 OCR_PROMPT = """You are transcribing one scanned page of a Cambodian Grade 12 (Bac II) mathematics document.
 
@@ -42,7 +44,9 @@ Transcribe everything on the page, faithfully and completely:
 - Write every mathematical expression in LaTeX: $...$ inline, $$...$$ for displayed equations.
   Use proper commands (\\frac, \\sqrt, \\lim_{x \\to a}, \\int_a^b, \\vec{u}, \\overrightarrow{AB}, \\begin{cases}...\\end{cases}).
   Khmer words inside a formula go in \\text{...}.
-- Keep the page structure: headings, exercise and question numbers (១. ២. ក. ខ. ...), line breaks between items.
+- Write titles as Markdown headings: # for a lesson or chapter title, ## for a section (e.g. និយមន័យ, ទ្រឹស្តីបទ, លំហាត់),
+  ### for a numbered exercise or problem. Only real titles, never ordinary sentences.
+- Keep the page structure: exercise and question numbers (១. ២. ក. ខ. ...), line breaks between items.
 - Write tables as Markdown tables.
 - For a figure or graph, write one line: [រូបភាព: short description of what it shows].
 - Skip page numbers, running headers/footers and watermarks.
@@ -54,6 +58,7 @@ If the page is blank, output nothing."""
 _CODE_FENCE = re.compile(r"\A\s*```[a-zA-Z]*\s*\n(.*?)\n\s*```\s*\Z", re.DOTALL)
 _IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
 _RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+_RETRY_HINT = re.compile(r"retry in (\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
 
 OCRMode = Literal["auto", "always", "never"]
 
@@ -73,8 +78,14 @@ class OCRError(RuntimeError):
 OCREngine = Literal["gemini", "kiri"]
 
 
-def page_payload(page: Any) -> PageImage:
-    """The page's single scan image if it has one, else a one-page PDF."""
+def page_payload(page: Any, render_scale: float = 2.0) -> PageImage:
+    """The page's single scan image if it has one, else the page rendered as PNG.
+
+    Rendering matters for typeset pages: a PDF's text layer can hold legacy
+    Khmer font encodings, and a vision model given the PDF may read that
+    broken layer instead of the glyphs. The one-page PDF is the fallback when
+    rendering fails.
+    """
     try:
         images = list(page.images)
     except Exception:
@@ -91,7 +102,25 @@ def page_payload(page: Any) -> PageImage:
     writer.add_page(page)
     buffer = io.BytesIO()
     writer.write(buffer)
-    return PageImage(buffer.getvalue(), "application/pdf")
+    pdf_bytes = buffer.getvalue()
+    try:
+        return PageImage(_render_png(pdf_bytes, render_scale), "image/png")
+    except Exception:
+        logger.debug("Could not render the page; sending it as PDF", exc_info=True)
+        return PageImage(pdf_bytes, "application/pdf")
+
+
+def _render_png(pdf_bytes: bytes, scale: float) -> bytes:
+    import pypdfium2 as pdfium
+
+    document = pdfium.PdfDocument(pdf_bytes)
+    try:
+        image = document[0].render(scale=scale).to_pil()
+    finally:
+        document.close()
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()
 
 
 def clean_transcript(text: str) -> str:
@@ -125,12 +154,20 @@ class CachedPageOCR:
         self._cache_lock = threading.Lock()
 
     def needs_ocr(self, extracted_text: str) -> bool:
-        return self.mode == "always" or len(extracted_text.strip()) < self.min_chars
+        return (
+            self.mode == "always"
+            or len(extracted_text.strip()) < self.min_chars
+            or looks_garbled(extracted_text)
+        )
 
     # -- cache ----------------------------------------------------------------
 
     def _cache_key(self, payload: PageImage) -> str:
         raise NotImplementedError
+
+    def _legacy_cache_keys(self, payload: PageImage) -> list[str]:
+        """Keys of older cache entries that are still valid transcripts."""
+        return []
 
     def _cache_path(self, key: str) -> Path | None:
         return self.cache_dir / f"{key}.md" if self.cache_dir is not None else None
@@ -168,9 +205,10 @@ class CachedPageOCR:
         Complete transcripts are cached; truncated ones never are.
         """
         key = self._cache_key(payload)
-        cached = self._read_cache(key)
-        if cached is not None:
-            return cached, False
+        for candidate in (key, *self._legacy_cache_keys(payload)):
+            cached = self._read_cache(candidate)
+            if cached is not None:
+                return cached, False
         text, truncated = self._transcribe_uncached(payload)
         if not truncated:
             self._write_cache(key, text)
@@ -228,6 +266,7 @@ class GeminiPageOCR(CachedPageOCR):
         max_retries: int = 4,
         thinking_level: str = "low",
         timeout: float = 300.0,
+        requests_per_minute: int = 0,
         client: Any = None,
     ) -> None:
         from google.genai import errors, types
@@ -246,15 +285,33 @@ class GeminiPageOCR(CachedPageOCR):
         self.max_retries = max(0, max_retries)
         self.thinking_level = thinking_level
         self.max_output_tokens = 16000
+        self._interval = 60.0 / requests_per_minute if requests_per_minute > 0 else 0.0
+        self._next_request = 0.0
+        self._pace_lock = threading.Lock()
 
-    def _cache_key(self, payload: PageImage) -> str:
+    def _cache_key(self, payload: PageImage, version: str = OCR_PROMPT_VERSION) -> str:
         # The model is deliberately not part of the key: a page transcribed by
         # any Gemini model is reused, so a quota-limited run can be finished with another.
         digest = hashlib.sha256()
-        for part in (OCR_PROMPT_VERSION, payload.mime_type):
+        for part in (version, payload.mime_type):
             digest.update(part.encode("utf-8") + b"\x00")
         digest.update(payload.data)
         return digest.hexdigest()
+
+    def _legacy_cache_keys(self, payload: PageImage) -> list[str]:
+        # Version 1 differs only in how headings are marked up.
+        return [self._cache_key(payload, "1")]
+
+    def _pace(self) -> None:
+        """Space requests out to stay under OCR_REQUESTS_PER_MINUTE."""
+        if not self._interval:
+            return
+        with self._pace_lock:
+            now = time.monotonic()
+            start = max(now, self._next_request)
+            self._next_request = start + self._interval
+        if start > now:
+            time.sleep(start - now)
 
     # -- transcription ----------------------------------------------------------
 
@@ -266,6 +323,7 @@ class GeminiPageOCR(CachedPageOCR):
             max_output_tokens=max_output_tokens,
             thinking_config=types.ThinkingConfig(thinking_level=self.thinking_level.upper()),
         )
+        self._pace()
         response = self._client.models.generate_content(
             model=self.model,
             contents=[
@@ -288,9 +346,13 @@ class GeminiPageOCR(CachedPageOCR):
     def _request_with_retries(self, payload: PageImage, max_output_tokens: int) -> tuple[str, bool]:
         errors = self._errors
         for attempt in range(self.max_retries + 1):
+            wait_hint = 0.0
             try:
                 return self._request(payload, max_output_tokens)
             except errors.APIError as exc:
+                # Quota errors say how long to wait ("Please retry in 46.1s").
+                hint = _RETRY_HINT.search(exc.message or "")
+                wait_hint = min(300.0, float(hint.group(1)) + 1.0) if hint else 0.0
                 retryable = (exc.code or 0) in _RETRYABLE_STATUS
                 if not retryable or attempt == self.max_retries:
                     first_line = (exc.message or "").strip().splitlines()[0] if exc.message else ""
@@ -299,6 +361,7 @@ class GeminiPageOCR(CachedPageOCR):
                 if attempt == self.max_retries:
                     raise OCRError(f"Gemini OCR request failed: {exc}") from exc
             delay = min(60.0, 2.0 ** (attempt + 1)) + random.uniform(0, 1)
+            delay = max(delay, wait_hint)
             logger.info("Gemini OCR busy; retrying in %.0fs (attempt %d)", delay, attempt + 1)
             time.sleep(delay)
         raise AssertionError("unreachable")
@@ -371,4 +434,5 @@ def build_ocr(settings: Settings) -> CachedPageOCR | None:
         max_retries=settings.ocr_max_retries,
         thinking_level=settings.ocr_thinking_level,
         timeout=settings.llm_timeout_seconds,
+        requests_per_minute=settings.ocr_requests_per_minute,
     )

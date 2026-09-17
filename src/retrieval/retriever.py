@@ -20,6 +20,8 @@ class RetrievedChunk:
     page: int | None
     score: float
     text: str  # formulas restored
+    title: str = ""
+    heading: str = ""
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -77,6 +79,8 @@ class Retriever:
                 page=hit.record.page,
                 score=round(hit.score, 6),
                 text=strip_word_boundaries(unmask_latex(hit.record.text, hit.record.vault)),
+                title=hit.record.metadata.get("title") or "",
+                heading=hit.record.metadata.get("heading") or "",
             )
             for hit in hits
         ]

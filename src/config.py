@@ -67,8 +67,8 @@ class Settings(BaseSettings):
     data_dir: Path = PROJECT_ROOT / "data"
 
     # --- Ingestion ---
-    chunk_size: int = Field(500, ge=50, le=20000)
-    chunk_overlap: int = Field(50, ge=0)
+    chunk_size: int = Field(700, ge=50, le=20000)
+    chunk_overlap: int = Field(100, ge=0)
     khmer_segmenter: KhmerSegmenterBackend = "auto"
 
     # --- OCR for scanned PDFs and images ---
@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     ocr_min_chars: int = Field(20, ge=0)
     ocr_concurrency: int = Field(4, ge=1, le=32)
     ocr_max_retries: int = Field(4, ge=0, le=10)
+    ocr_requests_per_minute: int = Field(0, ge=0, le=10000)
     ocr_thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
     ocr_cache_dir: Path = PROJECT_ROOT / "storage" / "ocr_cache"
 
