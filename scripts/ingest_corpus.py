@@ -4,13 +4,21 @@ Usage:
     uv run python scripts/ingest_corpus.py                 # index ./data
     uv run python scripts/ingest_corpus.py --data-dir notes --reset
     uv run python scripts/ingest_corpus.py --dry-run       # extract + chunk only
+    OCR_ENGINE=kiri uv run python scripts/ingest_corpus.py --only 'lessons/*.pdf'
 
 Each file is stored under its path relative to the data directory, so
 re-running the script replaces a file's chunks instead of duplicating them.
+
+An optional ``catalog.json`` in the data directory maps those relative paths
+to readable titles ({"lesson2.pdf": "មេរៀនទី២ លីមីតនៃអនុគមន៍"}). The title is
+embedded with every chunk and shown to the model, which helps when file
+names say nothing about the content.
 """
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import json
 import logging
 import sys
 import time
@@ -39,16 +47,31 @@ from src.vectorstore import EmbeddingMismatchError, InMemoryVectorStore  # noqa:
 logger = logging.getLogger("ingest_corpus")
 
 
-def discover_files(data_dir: Path, extensions: set[str]) -> list[Path]:
-    """Supported files under ``data_dir``, skipping hidden files and folders."""
+def discover_files(data_dir: Path, extensions: set[str], only: list[str] | None = None) -> list[Path]:
+    """Supported files under ``data_dir``, skipping hidden files and folders.
+
+    ``only`` keeps files whose relative path matches one of the glob patterns.
+    """
     files = []
     for path in sorted(data_dir.rglob("*")):
         relative = path.relative_to(data_dir)
         if any(part.startswith(".") for part in relative.parts):
             continue
+        if only and not any(fnmatch.fnmatch(relative.as_posix(), pattern) for pattern in only):
+            continue
         if path.is_file() and path.suffix.lower() in extensions:
             files.append(path)
     return files
+
+
+def load_catalog(path: Path) -> dict[str, str]:
+    """Titles by source path, or an empty mapping when there is no catalog."""
+    if not path.is_file():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must map file paths to titles")
+    return {str(source): str(title).strip() for source, title in data.items()}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -64,10 +87,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--no-ocr", action="store_true", help="skip OCR of scanned PDF pages and images")
     parser.add_argument(
+        "--catalog",
+        type=Path,
+        default=None,
+        help="JSON file mapping file paths to titles (default: <data-dir>/catalog.json)",
+    )
+    parser.add_argument(
         "--extensions",
         nargs="+",
         default=sorted(SUPPORTED_EXTENSIONS),
         help="file extensions to include (default: all supported)",
+    )
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        metavar="PATTERN",
+        help="index only files whose path (relative to the data directory) matches a glob pattern",
     )
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser.parse_args(argv)
@@ -92,11 +127,19 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Unsupported extension(s): %s", ", ".join(sorted(unknown)))
         return 2
 
-    files = discover_files(data_dir, extensions)
+    files = discover_files(data_dir, extensions, args.only)
     if not files:
         logger.warning("No %s files found in %s", "/".join(sorted(extensions)), data_dir)
         return 0
     logger.info("Found %d file(s) in %s", len(files), data_dir)
+
+    try:
+        catalog = load_catalog(args.catalog or data_dir / "catalog.json")
+    except (OSError, ValueError) as exc:
+        logger.error("Could not read the catalog: %s", exc)
+        return 2
+    if catalog:
+        logger.info("Catalog has titles for %d file(s)", len(catalog))
 
     segmenter = KhmerSegmenter(settings.khmer_segmenter)
     ocr = None if args.no_ocr else build_ocr(settings)
@@ -110,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
             source = path.relative_to(data_dir).as_posix()
             try:
                 document = extract_file(path, source=source, ocr=ocr)
+                document.title = catalog.get(source, "")
                 prepared = prepare_document(
                     document,
                     chunk_size=settings.chunk_size,
@@ -156,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             try:
                 document = extract_file(path, source=source, ocr=ocr)
+                document.title = catalog.get(source, "")
                 result = index_document(
                     document,
                     store=store,

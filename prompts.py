@@ -164,6 +164,11 @@ def build_context_block(chunks: Sequence[ContextChunk]) -> str:
     passages = []
     for number, chunk in enumerate(chunks, start=1):
         page = f' page="{chunk.page}"' if chunk.page is not None else ""
+        # Title and section heading come from the ingested document structure.
+        for name in ("title", "heading"):
+            value = getattr(chunk, name, "")
+            if value:
+                page += f' {"section" if name == "heading" else name}="{_escape_attribute(value)}"'
         passages.append(
             f'<passage id="{number}" source="{_escape_attribute(chunk.source)}"{page} '
             f'score="{chunk.score:.3f}">\n{_escape_passage(chunk.text)}\n</passage>'
@@ -210,7 +215,7 @@ def build_extractive_answer(chunks: Sequence[ContextChunk], language: Language) 
         return text["empty"]
     lines = [text["header"], ""]
     for number, chunk in enumerate(chunks, start=1):
-        location = f"{chunk.source}"
+        location = getattr(chunk, "title", "") or f"{chunk.source}"
         if chunk.page is not None:
             location += f", {text['page']} {chunk.page}"
         lines.append(f"**[{number}] {location}** ({text['score']} {chunk.score:.2f})")

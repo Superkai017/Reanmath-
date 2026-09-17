@@ -35,7 +35,8 @@ upload / data/  ──► extract.py ──► latex_guard.mask_latex ──► 
                                                                      │
                      vectorstore (in-memory cosine index,     ◄── chunk.py
                      atomic index.npz on disk)                    (recursive splitter,
-                              ▲                                    500 / 50 overlap)
+                              ▲                                    700 / 100 overlap,
+                              │                                    heading-aware)
                               │ embedder.py (multilingual-e5 or hashing)
                               │
 question ──► retriever.py (top-k, threshold, formula restoration)
@@ -60,7 +61,7 @@ question ──► retriever.py (top-k, threshold, formula restoration)
 | `src/ingestion/extract.py` | PDF (per page), image, Markdown (syntax stripped, formulas kept) and text extraction |
 | `src/ingestion/ocr.py` | OCR engine selection, shared page cache, and Gemini vision OCR (Khmer + LaTeX) with retries |
 | `src/ingestion/khmer_ocr.py` | Kiri OCR: local, open-source Khmer OCR that keeps Khmer words only |
-| `src/ingestion/chunk.py` | `RecursiveCharacterTextSplitter` aware of placeholders and Khmer boundaries |
+| `src/ingestion/chunk.py` | `RecursiveCharacterTextSplitter` aware of placeholders and Khmer boundaries; tracks the pages a chunk spans |
 | `src/ingestion/__init__.py` | `prepare_document` / `index_document` pipeline with a formula-integrity check |
 | `src/embeddings/embedder.py` | sentence-transformers embedder (E5 prefixes handled) and offline hashing embedder |
 | `src/vectorstore/__init__.py` | in-memory cosine index with persistence and embedding-model checks |
@@ -99,6 +100,31 @@ uv run python scripts/ingest_corpus.py            # add or replace documents
 uv run python scripts/ingest_corpus.py --dry-run  # extraction and chunking stats only
 uv run python scripts/ingest_corpus.py --reset    # rebuild from scratch
 ```
+
+File names like `3296fa21-….pdf` say nothing to a student or to the model.
+Put a `data/catalog.json` next to the files to give them titles:
+
+```json
+{"14f913db-eece-4f5b-893f-3e00fb526830.pdf": "មេរៀនទី២ លីមីតនៃអនុគមន៍ (ភាគ ១)"}
+```
+
+### Chunking
+
+- Text is split into chunks of up to `CHUNK_SIZE` characters (formulas at full
+  length). At 700 characters, the longest chunks, with their header, stay
+  under the 512-token input limit of `multilingual-e5-small`. Formula-dense
+  Khmer averages about 0.6 tokens per character, and past the limit the
+  embedder silently ignores the rest of the chunk.
+- OCR transcripts are Markdown. Their headings (`#` lesson, `##` section,
+  `###` exercise) are tracked across pages. A chunk never crosses into a new
+  heading, but it does run across a page break, so a worked example that
+  continues on the next page stays together. Each chunk records the page it
+  starts on (`page`) and ends on (`metadata.page_end`).
+- Every chunk is embedded with a header of the document title and heading
+  path (`title › lesson › section`). The title and section are also passed to
+  the model as passage attributes, so it can cite the lesson by name.
+- Changing `CHUNK_SIZE`, `CHUNK_OVERLAP` or the catalog takes effect when the
+  documents are indexed again (the OCR cache makes this cheap).
 
 Start the server and open <http://localhost:8000>:
 
@@ -194,11 +220,12 @@ important ones:
 | `GEMINI_MODEL` | `gemini-3.8-flash` | |
 | `EMBEDDING_BACKEND` | `sentence-transformers` | `hashing` works offline with lexical matching only |
 | `EMBEDDING_MODEL` | `intfloat/multilingual-e5-small` | Changing it requires `--reset` |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `500` / `50` | Measured in displayed characters |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `700` / `100` | Measured in displayed characters; see [Chunking](#chunking) |
 | `TOP_K` / `SCORE_THRESHOLD` | `5` / `0.75` | Use a threshold around `0.2` with the hashing backend |
 | `KHMER_SEGMENTER` | `auto` | `crf` (khmer-nltk), `regex`, or `auto` |
 | `OCR_MODE` / `OCR_ENGINE` | `auto` / `auto` | OCR of scanned PDF pages and images; see below |
 | `OCR_MODEL` | `gemini-3.5-flash` | Gemini OCR model |
+| `OCR_REQUESTS_PER_MINUTE` | `0` | Client-side Gemini OCR rate limit (`0` = none; about `5` on the free tier) |
 | `KIRI_MIN_CONFIDENCE` / `KIRI_KHMER_ONLY` | `0.2` / `true` | Kiri OCR filtering |
 
 ## Scanned PDFs and images (OCR)
@@ -247,10 +274,16 @@ Unicode and writes formulas as LaTeX.
   re-ingesting costs nothing. Review these files to check OCR quality. Kiri
   and Gemini transcripts are cached separately, and changing a Kiri setting
   creates new cache entries.
-- `OCR_MODE=always` also OCRs pages that have text, which helps with older PDFs
-  whose legacy Khmer fonts extract as garbage.
-- Busy Gemini (429/503) responses are retried with backoff. A page that still
-  fails is skipped with a warning; the rest of the document is indexed.
+- Pages whose text layer uses a legacy Khmer font encoding (visual-order
+  vowels such as `េមេរៀន`, private-use glyphs) are detected and OCR'd even
+  in `auto` mode. Typeset pages are rendered to PNG first, so Gemini reads
+  the glyphs rather than the broken text layer. If such a page cannot be
+  OCR'd, it is skipped rather than indexed as noise. `OCR_MODE=always` OCRs
+  every page.
+- Busy Gemini (429/503) responses are retried with backoff, waiting as long
+  as a quota error asks. A page that still fails is skipped with a warning,
+  and the rest of the document is indexed. Run the ingestion again to fill
+  in the missing pages from the API (pages already done come from the cache).
 - Uploading a scanned PDF in the browser OCRs it during the request, which can
   take several minutes. For large files, prefer
   `uv run python scripts/ingest_corpus.py` (use `--no-ocr` to skip OCR).

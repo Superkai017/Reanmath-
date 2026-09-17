@@ -13,6 +13,7 @@ word boundaries marked with ZWSP (see ``khmer_segment``). The splitter:
 """
 from __future__ import annotations
 
+import bisect
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -52,6 +53,8 @@ class Chunk:
     vault: dict[str, str] = field(default_factory=dict)
     index: int = 0
     page: int | None = None
+    last_page: int | None = None
+    heading: str = ""
 
     @property
     def restored_text(self) -> str:
@@ -172,16 +175,35 @@ def chunk_text(
     chunk_size: int = 500,
     chunk_overlap: int = 50,
     page: int | None = None,
+    page_starts: Sequence[tuple[int, int | None]] | None = None,
+    heading: str = "",
     start_index: int = 0,
 ) -> list[Chunk]:
-    """Split masked text into ``Chunk`` objects, each with its own sub-vault."""
+    """Split masked text into ``Chunk`` objects, each with its own sub-vault.
+
+    ``page_starts`` lists ``(offset, page)`` pairs, in offset order, for text
+    that runs across pages; each chunk then gets the page it starts on and
+    the page it ends on. Without it every chunk is on ``page``.
+    """
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         length_function=restored_length(vault),
     )
+    starts = list(page_starts) if page_starts else [(0, page)]
+    offsets = [offset for offset, _ in starts]
+
+    def page_at(position: int) -> int | None:
+        return starts[max(0, bisect.bisect_right(offsets, position) - 1)][1]
+
     chunks: list[Chunk] = []
+    cursor = 0
     for piece in splitter.split_text(masked_text):
+        # Pieces are in order and are exact substrings of the input.
+        position = masked_text.find(piece, cursor)
+        if position < 0:
+            position = cursor
+        cursor = position + 1
         text = strip_word_boundaries(piece).strip()
         if not text:
             continue
@@ -190,7 +212,9 @@ def chunk_text(
                 text=text,
                 vault=sub_vault(text, vault),
                 index=start_index + len(chunks),
-                page=page,
+                page=page_at(position),
+                last_page=page_at(position + len(piece) - 1),
+                heading=heading,
             )
         )
     return chunks

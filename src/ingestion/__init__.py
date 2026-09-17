@@ -48,6 +48,7 @@ class PreparedDocument:
     formulas: int
     characters: int
     pages: int | None = None
+    title: str = ""
     warnings: list[str] = field(default_factory=list)
     ocr_page_numbers: frozenset[int] = frozenset()
 
@@ -73,6 +74,38 @@ class EmptyDocumentError(ValueError):
     pass
 
 
+_STREAM_SEPARATOR = "\n\n"
+MAX_CONTEXT_HEADER_CHARS = 160
+
+
+def _heading_streams(sections: list[Section]) -> list[list[Section]]:
+    """Group sections into runs of text under one heading.
+
+    A run continues across page breaks and ends where a new heading starts,
+    so a chunk can span two pages but never two headings.
+    """
+    streams: list[list[Section]] = []
+    for section in sections:
+        if streams and not section.starts_heading and section.heading == streams[-1][-1].heading:
+            streams[-1].append(section)
+        else:
+            streams.append([section])
+    return streams
+
+
+def context_header(title: str, heading: str) -> str:
+    """Document title and heading path, prepended to a chunk for embedding."""
+    header = " › ".join(part for part in (title.strip(), heading.strip()) if part)
+    if len(header) > MAX_CONTEXT_HEADER_CHARS:
+        header = "…" + header[-(MAX_CONTEXT_HEADER_CHARS - 1):]
+    return header
+
+
+def embedding_text(title: str, chunk: Chunk) -> str:
+    header = context_header(title, chunk.heading)
+    return f"{header}\n\n{chunk.restored_text}" if header else chunk.restored_text
+
+
 def prepare_document(
     document: ExtractedDocument,
     *,
@@ -80,33 +113,49 @@ def prepare_document(
     chunk_overlap: int,
     segmenter: KhmerSegmenter,
 ) -> PreparedDocument:
-    """Run the LaTeX-guarded text pipeline over every section of a document."""
+    """Run the LaTeX-guarded text pipeline over a document, one heading run at a time."""
     chunks: list[Chunk] = []
     formulas = 0
     characters = 0
-    for section in document.sections:
-        masked, vault = mask_latex(section.text)
-        normalized = normalize_khmer_text(masked)
-        if not normalized:
+    for stream in _heading_streams(document.sections):
+        parts: list[str] = []
+        page_starts: list[tuple[int, int | None]] = []
+        vault: dict[str, str] = {}
+        expected: set[str] = set()
+        offset = 0
+        for section in stream:
+            masked, section_vault = mask_latex(section.text)
+            normalized = normalize_khmer_text(masked)
+            if not normalized:
+                continue
+            if parts:
+                offset += len(_STREAM_SEPARATOR)
+            page_starts.append((offset, section.page))
+            segmented = segmenter.insert_word_boundaries(normalized)
+            parts.append(segmented)
+            offset += len(segmented)
+            vault.update(section_vault)
+            expected.update(find_placeholders(normalized))
+            formulas += len(section_vault)
+            characters += len(unmask_latex(normalized, section_vault))
+        if not parts:
             continue
-        segmented = segmenter.insert_word_boundaries(normalized)
-        section_chunks = chunk_text(
-            segmented,
+        stream_chunks = chunk_text(
+            _STREAM_SEPARATOR.join(parts),
             vault,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
-            page=section.page,
+            page_starts=page_starts,
+            heading=stream[0].heading,
             start_index=len(chunks),
         )
-        covered = {token for chunk in section_chunks for token in find_placeholders(chunk.text)}
-        missing = set(find_placeholders(normalized)) - covered
+        covered = {token for chunk in stream_chunks for token in find_placeholders(chunk.text)}
+        missing = expected - covered
         if missing:
             raise LatexIntegrityError(
                 f"{len(missing)} formula(s) from {document.source} were not preserved in any chunk"
             )
-        chunks.extend(section_chunks)
-        formulas += len(vault)
-        characters += len(unmask_latex(normalized, vault))
+        chunks.extend(stream_chunks)
     return PreparedDocument(
         source=document.source,
         format=document.format,
@@ -114,6 +163,7 @@ def prepare_document(
         formulas=formulas,
         characters=characters,
         pages=document.pages,
+        title=document.title,
         warnings=list(document.warnings),
         ocr_page_numbers=frozenset(
             section.page for section in document.sections if section.ocr and section.page is not None
@@ -151,7 +201,7 @@ def index_document(
         hint = " ".join(prepared.warnings)
         raise EmptyDocumentError(f"No extractable text in '{document.source}'. {hint}".strip())
 
-    vectors = embedder.embed_documents([chunk.restored_text for chunk in prepared.chunks])
+    vectors = embedder.embed_documents([embedding_text(prepared.title, chunk) for chunk in prepared.chunks])
     records = [
         ChunkRecord(
             id=chunk_id(prepared.source, chunk),
@@ -164,6 +214,9 @@ def index_document(
             metadata={
                 "language": detect_language(chunk.restored_text),
                 "ocr": chunk.page in prepared.ocr_page_numbers,
+                "title": prepared.title,
+                "heading": chunk.heading,
+                "page_end": chunk.last_page,
             },
         )
         for chunk in prepared.chunks

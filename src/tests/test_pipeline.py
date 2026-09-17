@@ -309,8 +309,39 @@ class TestChunking:
         )
         prepared = prepare_document(document, chunk_size=500, chunk_overlap=50, segmenter=regex_segmenter)
         assert prepared.formulas == 3
-        assert [chunk.page for chunk in prepared.chunks] == [1, 2]
-        assert prepared.chunks[1].restored_text == "Page two $$b$$ and $c$"
+        # Text under the same heading runs across the page break.
+        [chunk] = prepared.chunks
+        assert (chunk.page, chunk.last_page) == (1, 2)
+        assert chunk.restored_text == "ទំព័រទីមួយ $a^2$\n\nPage two $$b$$ and $c$"
+
+        small = prepare_document(document, chunk_size=25, chunk_overlap=0, segmenter=regex_segmenter)
+        assert small.formulas == 3
+        assert [(c.page, c.last_page) for c in small.chunks] == [(1, 1), (2, 2)]
+        assert small.chunks[1].restored_text == "Page two $$b$$ and $c$"
+
+    def test_chunks_follow_headings_across_pages(self, regex_segmenter):
+        from src.ingestion import embedding_text
+
+        document = ExtractedDocument(
+            "book.pdf",
+            "pdf",
+            [
+                Section("Limits intro", page=1, heading="Limits", starts_heading=True),
+                Section("Definition text", page=1, heading="Limits › Definition", starts_heading=True),
+                Section("definition continued", page=2, heading="Limits › Definition"),
+                Section("Example one", page=2, heading="Limits › Example", starts_heading=True),
+            ],
+            title="Lesson 2",
+        )
+        prepared = prepare_document(document, chunk_size=500, chunk_overlap=50, segmenter=regex_segmenter)
+        assert [(c.heading, c.page, c.last_page) for c in prepared.chunks] == [
+            ("Limits", 1, 1),
+            ("Limits › Definition", 1, 2),
+            ("Limits › Example", 2, 2),
+        ]
+        assert embedding_text(prepared.title, prepared.chunks[1]) == (
+            "Lesson 2 › Limits › Definition\n\nDefinition text\n\ndefinition continued"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -604,7 +635,8 @@ class TestOCR:
 
         call = client.calls[0]
         assert call["model"] == "gemini-test"
-        assert call["contents"][0].inline_data.mime_type == "application/pdf"
+        # Typeset pages are rendered, so the model reads glyphs, not the text layer.
+        assert call["contents"][0].inline_data.mime_type == "image/png"
         assert len(list((tmp_path / "ocr").glob("*.md"))) == 1
 
         again = extract_document(data, "scan.pdf", ocr=ocr)
@@ -634,10 +666,11 @@ class TestOCR:
         assert len(client.calls) == 2, "non-retryable errors are not retried"
         assert not list((tmp_path / "ocr").glob("*.md")), "failures must not be cached"
 
-    def test_ocr_modes_and_page_payloads(self, tmp_path):
+    def test_ocr_modes_and_page_payloads(self, tmp_path, monkeypatch):
         from pypdf import PdfReader
         import io
 
+        import src.ingestion.ocr as ocr_module
         from src.ingestion.ocr import page_payload
 
         auto = _ocr(FakeGeminiClient(["x"]), tmp_path, min_chars=10)
@@ -647,8 +680,64 @@ class TestOCR:
 
         page = PdfReader(io.BytesIO(make_pdf(["hello"]))).pages[0]
         payload = page_payload(page)
-        assert payload.mime_type == "application/pdf"
-        assert PdfReader(io.BytesIO(payload.data)).pages[0].extract_text().strip() == "hello"
+        assert payload.mime_type == "image/png" and payload.data.startswith(b"\x89PNG")
+
+        monkeypatch.setattr(ocr_module, "_render_png", lambda *args: 1 / 0)
+        fallback = page_payload(page)
+        assert fallback.mime_type == "application/pdf"
+        assert PdfReader(io.BytesIO(fallback.data)).pages[0].extract_text().strip() == "hello"
+
+    def test_quota_errors_wait_as_asked_and_old_cache_is_reused(self, tmp_path, monkeypatch):
+        from google.genai import errors
+
+        import src.ingestion.ocr as ocr_module
+        from src.ingestion.ocr import PageImage
+
+        sleeps: list[float] = []
+        monkeypatch.setattr(ocr_module.time, "sleep", sleeps.append)
+        quota = errors.APIError(429, {"error": {"code": 429, "message": "Quota exceeded. Please retry in 46.1s.", "status": "X"}})
+        client = FakeGeminiClient([quota, "ទំព័រ"])
+        ocr = _ocr(client, tmp_path)
+        payload = PageImage(b"page", "image/png")
+        assert ocr.transcribe(payload) == "ទំព័រ"
+        assert sleeps and sleeps[0] >= 47
+
+        # A transcript cached under the previous prompt version is still used.
+        old = PageImage(b"old page", "image/png")
+        ocr._write_cache(ocr._cache_key(old, "1"), "ចាស់")
+        assert ocr.transcribe(old) == "ចាស់"
+        assert len(client.calls) == 2
+
+    def test_running_headers_and_footers_are_removed(self):
+        from src.ingestion.extract import remove_running_lines
+
+        pages = {
+            n: f"មេរៀនទី៣ ដេរីវេ\nbody {n}\nដំណោះស្រាយ\nmore {n}\nអ្នករៀបរៀង លឹម ផល្គុន"
+            for n in range(1, 7)
+        }
+        pages[6] = "unique page\nដំណោះស្រាយ"
+        cleaned = remove_running_lines(pages)
+        assert cleaned[1] == "body 1\nដំណោះស្រាយ\nmore 1"
+        assert cleaned[6] == "unique page\nដំណោះស្រាយ", "only lines at the page edges are dropped"
+        assert remove_running_lines({1: "a\nb"}) == {1: "a\nb"}, "short documents are left alone"
+
+    def test_garbled_text_layers_need_ocr(self, tmp_path, monkeypatch):
+        import src.ingestion.extract as extract_module
+        from src.ingestion.khmer_segment import looks_garbled
+
+        legacy = "េមេរៀនទី២ ល\ufffdម\ufffdតៃនអនុគមន៍ ស្រមាប ់ ថាទី១២ េគថចណីាសរេសរ"
+        proper = "មេរៀនទី២ លីមីតនៃអនុគមន៍ សម្រាប់ថ្នាក់ទី១២ គេកំណត់សរសេរ $\\lim f(x)$"
+        assert looks_garbled(legacy) and not looks_garbled(proper)
+        assert not looks_garbled("េ short"), "too little Khmer to judge"
+        auto = _ocr(FakeGeminiClient(["x"]), tmp_path)
+        assert auto.needs_ocr(legacy) and not auto.needs_ocr(proper)
+
+        # Without OCR a garbled page is skipped instead of indexed as noise.
+        layers = {1: legacy, 2: proper}
+        monkeypatch.setattr(extract_module, "_page_text", lambda page, number: layers[number])
+        document = extract_document(make_pdf(["a", "b"]), "legacy.pdf", ocr=None)
+        assert [section.page for section in document.sections] == [2]
+        assert any("1 page(s) with an unreadable Khmer text layer" in w for w in document.warnings)
 
     def test_build_ocr_respects_settings(self, tmp_path, monkeypatch):
         import src.ingestion.ocr as ocr_module
@@ -689,8 +778,10 @@ class TestOCR:
             chunk_size=500, chunk_overlap=50, persist=False,
         )
         assert result.ocr_pages == 1
-        flags = {record.page: record.metadata["ocr"] for record in store.records()}
-        assert flags == {1: True, 2: False}
+        # The typed page continues the OCR page's exercise, so they share a chunk.
+        [record] = store.records()
+        assert (record.page, record.metadata["page_end"], record.metadata["ocr"]) == (1, 2, True)
+        assert record.metadata["heading"] == "លំហាត់ ១"
 
 
 class TruncatingGeminiClient(FakeGeminiClient):

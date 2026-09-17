@@ -247,6 +247,25 @@ def khmer_ratio(text: str) -> float:
     return khmer / total if total else 0.0
 
 
+_ORPHAN_KHMER_MARK = re.compile(r"(?:^|[^\u1780-\u17FF\u200C\u200D])[\u17B6-\u17D3\u17DD]")
+_BROKEN_GLYPH = re.compile(r"[\uE000-\uF8FF\uFFFD]")
+
+
+def looks_garbled(text: str, threshold: float = 0.02, min_khmer: int = 20) -> bool:
+    """True for a PDF text layer whose Khmer came from a legacy font encoding.
+
+    Such layers store glyphs in visual order (``េមេរៀន`` for ``មេរៀន``) and map
+    some glyphs to private-use or replacement characters. Correct Unicode never
+    starts a word with a dependent vowel, sign or COENG, so the share of those
+    orphaned marks, plus broken glyphs, separates the two reliably.
+    """
+    khmer = sum(1 for char in text if is_khmer_char(char))
+    if khmer < min_khmer:
+        return False
+    suspicious = len(_ORPHAN_KHMER_MARK.findall(text)) + len(_BROKEN_GLYPH.findall(text))
+    return suspicious / khmer > threshold
+
+
 def detect_language(text: str, default: Language = "km") -> Language:
     """Detect Khmer vs English from Unicode code points.
 
