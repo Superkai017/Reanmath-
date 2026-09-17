@@ -157,13 +157,22 @@
 
   // Markdown with LaTeX: formulas are pulled out before Markdown parsing (so
   // `_`, `*` and `\\` inside them survive), the HTML is sanitised, and KaTeX
-  // output is spliced back in.
-  function renderRich(text) {
+  // output is spliced back in. With `figures`, ```geogebra blocks become
+  // placeholders that mountFigures() turns into interactive graphs.
+  function renderRich(text, { figures = false } = {}) {
     if (!librariesReady()) {
       return `<p style="white-space: pre-wrap">${escapeHtml(text)}</p>`;
     }
+    const blocks = [];
+    let source = String(text);
+    if (figures) {
+      source = source.replace(FIGURE_RE, (_, kind, body) => {
+        blocks.push({ is3d: kind.toLowerCase() === "geogebra-3d", commands: body });
+        return `\n\nGGBFIG${blocks.length - 1}XEND\n\n`;
+      });
+    }
     const formulas = [];
-    const masked = String(text).replace(MATH_RE, (match, display, bracket, env, paren, inline) => {
+    const masked = source.replace(MATH_RE, (match, display, bracket, env, paren, inline) => {
       let formula;
       if (display !== undefined) formula = { tex: display, display: true };
       else if (bracket !== undefined) formula = { tex: bracket, display: true };
@@ -174,9 +183,293 @@
       return `MATHPH${formulas.length - 1}XEND`;
     });
     const html = window.DOMPurify.sanitize(window.marked.parse(masked, { gfm: true, breaks: true }));
-    return html.replace(PLACEHOLDER_RE, (_, index) => {
-      const formula = formulas[Number(index)];
-      return formula ? renderMath(formula) : "";
+    return html
+      .replace(PLACEHOLDER_RE, (_, index) => {
+        const formula = formulas[Number(index)];
+        return formula ? renderMath(formula) : "";
+      })
+      .replace(FIGURE_PLACEHOLDER_RE, (_, index) => {
+        const block = blocks[Number(index)];
+        if (!block) return "";
+        // Added after sanitising; the commands are only ever read back as text.
+        const data = escapeHtml(JSON.stringify(block));
+        return `<div class="ggb-figure" data-figure="${data}"></div>`;
+      });
+  }
+
+  // ------------------------------------------------------ GeoGebra figures
+
+  // A fenced block with info string `geogebra` (2D) or `geogebra-3d`.
+  const FIGURE_RE = /^[ \t]*```[ \t]*(geogebra(?:-3d)?)[ \t]*\r?\n([\s\S]*?)^[ \t]*```[ \t]*$/gim;
+  const FIGURE_PLACEHOLDER_RE = /(?:<p>)?GGBFIG(\d+)XEND(?:<\/p>)?/g;
+  const GGB_SCRIPT = "https://www.geogebra.org/apps/deployggb.js";
+  const FIGURE_WIDTH = 720;
+  const FIGURE_HEIGHT = 420;
+  // Keep x and y at the same scale (circles stay round) unless that would
+  // stretch a range by more than this factor.
+  const MAX_EQUAL_AXES_STRETCH = 3;
+  const MAX_FIGURE_LINES = 40;
+  const MAX_FIGURE_LINE_CHARS = 400;
+  // GeoGebra script commands can run other commands or play media; never
+  // execute them from model output.
+  const BLOCKED_COMMANDS =
+    /\b(Execute|SetClickScript|SetUpdateScript|RunClickScript|RunUpdateScript|PlaySound|ReadText|UpdateConstruction)\s*[(\[]/i;
+
+  let ggbLoader = null;
+  let figureCounter = 0;
+  const mountedApplets = new Map(); // element id -> GeoGebra api
+
+  function loadGeoGebra() {
+    if (window.GGBApplet) return Promise.resolve();
+    if (!ggbLoader) {
+      ggbLoader = new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = GGB_SCRIPT;
+        script.async = true;
+        script.onload = () => (window.GGBApplet ? resolve() : reject(new Error("GeoGebra did not load")));
+        script.onerror = () => {
+          ggbLoader = null; // allow a retry later
+          script.remove();
+          reject(new Error("Could not load GeoGebra (are you offline?)"));
+        };
+        document.head.appendChild(script);
+      });
+    }
+    return ggbLoader;
+  }
+
+  function parseFigureCommands(body) {
+    const commands = [];
+    const skipped = [];
+    for (const raw of String(body).split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#") || line.startsWith("//")) continue;
+      if (BLOCKED_COMMANDS.test(line) || line.length > MAX_FIGURE_LINE_CHARS) {
+        skipped.push(line);
+      } else if (commands.length < MAX_FIGURE_LINES) {
+        commands.push(line);
+      } else {
+        skipped.push(line);
+      }
+    }
+    return { commands, skipped };
+  }
+
+  // ZoomIn(xmin, ymin, xmax, ymax) or the 3D form with six numbers. The
+  // command zooms but reports failure, so the view is set through the API.
+  const ZOOM_RE = /^ZoomIn\s*\(([^()]*)\)\s*;?$/i;
+
+  function applyZoom(api, command, is3d) {
+    const match = ZOOM_RE.exec(command);
+    if (!match) return null;
+    const values = match[1].split(",").map((part) => Number(part.trim()));
+    if (values.some((value) => !Number.isFinite(value))) return null;
+    try {
+      if (values.length === 4) {
+        let [xmin, ymin, xmax, ymax] = values;
+        if (xmin >= xmax || ymin >= ymax) return false;
+        const viewRatio = FIGURE_WIDTH / FIGURE_HEIGHT;
+        const width = xmax - xmin;
+        const height = ymax - ymin;
+        const ratio = width / height;
+        // How much one range must grow for x and y to share a scale.
+        const stretch = ratio < viewRatio ? viewRatio / ratio : ratio / viewRatio;
+        if (stretch <= MAX_EQUAL_AXES_STRETCH) {
+          if (ratio < viewRatio) {
+            const extra = (height * viewRatio - width) / 2;
+            xmin -= extra;
+            xmax += extra;
+          } else {
+            const extra = (width / viewRatio - height) / 2;
+            ymin -= extra;
+            ymax += extra;
+          }
+        }
+        api.setCoordSystem(xmin, xmax, ymin, ymax);
+        return true;
+      }
+      if (values.length === 6 && is3d) {
+        const [xmin, ymin, zmin, xmax, ymax, zmax] = values;
+        if (xmin >= xmax || ymin >= ymax || zmin >= zmax) return false;
+        api.setCoordSystem(xmin, xmax, ymin, ymax, zmin, zmax, false);
+        return true;
+      }
+    } catch {
+      return false;
+    }
+    return null;
+  }
+
+  function figureFallback(figure, block, message) {
+    figure.classList.add("failed");
+    figure.replaceChildren();
+    const note = document.createElement("div");
+    note.className = "ggb-note";
+    note.textContent = message;
+    const pre = document.createElement("pre");
+    const code = document.createElement("code");
+    code.textContent = block.commands;
+    pre.appendChild(code);
+    figure.append(note, pre);
+  }
+
+  function downloadPng(api) {
+    try {
+      const base64 = api.getPNGBase64(2, false, 144);
+      const link = document.createElement("a");
+      link.href = `data:image/png;base64,${base64}`;
+      link.download = "bondus-graph.png";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch {
+      toast("Could not export the graph as PNG.", "error");
+    }
+  }
+
+  async function mountFigure(figure) {
+    let block;
+    try {
+      block = JSON.parse(figure.dataset.figure || "{}");
+    } catch {
+      return;
+    }
+    const { commands, skipped } = parseFigureCommands(block.commands);
+    if (!commands.length) {
+      figureFallback(figure, block, "This figure has no drawable commands.");
+      return;
+    }
+
+    figure.innerHTML = `
+      <div class="ggb-frame"><div class="ggb-loading"><span class="spinner"></span>Drawing graph…</div></div>
+      <div class="ggb-bar">
+        <span class="ggb-label">${block.is3d ? "3D graph" : "Graph"} · GeoGebra</span>
+        <span class="ggb-status"></span>
+        <button type="button" class="ggb-download" disabled>${icon("download")}<span>PNG</span></button>
+      </div>`;
+    const frame = figure.querySelector(".ggb-frame");
+    const status = figure.querySelector(".ggb-status");
+    const download = figure.querySelector(".ggb-download");
+
+    try {
+      await loadGeoGebra();
+    } catch (error) {
+      figureFallback(figure, block, `${error.message} Showing the GeoGebra commands instead.`);
+      return;
+    }
+    if (!figure.isConnected) return;
+
+    figureCounter += 1;
+    const id = `ggb-${figureCounter}`;
+    const host = document.createElement("div");
+    host.id = id;
+    host.className = "ggb-host";
+    frame.appendChild(host);
+
+    const params = {
+      id,
+      // The classic app honours `perspective`: graphics view only ("G" 2D,
+      // "T" 3D), since the equations are already in the answer text.
+      appName: "classic",
+      perspective: block.is3d ? "T" : "G",
+      width: FIGURE_WIDTH,
+      height: FIGURE_HEIGHT,
+      scaleContainerClass: "ggb-frame",
+      allowUpscale: false,
+      showToolBar: false,
+      showMenuBar: false,
+      showAlgebraInput: false,
+      showResetIcon: true,
+      showZoomButtons: true,
+      showFullscreenButton: true,
+      enableRightClick: false,
+      enableLabelDrags: false,
+      enableShiftDragZoom: true,
+      enableUndoRedo: false,
+      errorDialogsActive: false,
+      disableJavaScript: true,
+      useBrowserForJS: true,
+      preventFocus: true,
+      borderColor: "#FFFFFF",
+      appletOnLoad: (api) => {
+        mountedApplets.set(id, api);
+        frame.querySelector(".ggb-loading")?.remove();
+        if (!figure.isConnected) {
+          unmountApplet(id);
+          return;
+        }
+        try {
+          api.setErrorDialogsActive(false);
+        } catch {
+          /* older API */
+        }
+        const failed = [...skipped];
+        for (const command of commands) {
+          let ok = applyZoom(api, command, block.is3d);
+          if (ok === null) {
+            try {
+              ok = api.evalCommand(command);
+            } catch {
+              ok = false;
+            }
+          }
+          if (!ok) failed.push(command);
+        }
+        if (failed.length) {
+          status.textContent = `${failed.length} command${failed.length === 1 ? "" : "s"} skipped`;
+          status.title = failed.join("\n");
+        }
+        download.disabled = false;
+        download.addEventListener("click", () => downloadPng(api));
+      },
+    };
+
+    try {
+      new window.GGBApplet(params, true).inject(id);
+    } catch (error) {
+      figureFallback(figure, block, `GeoGebra failed to start (${error.message}).`);
+    }
+  }
+
+  // Graphs load only when scrolled into view.
+  const figureObserver =
+    "IntersectionObserver" in window
+      ? new IntersectionObserver(
+          (entries) => {
+            for (const entry of entries) {
+              if (entry.isIntersecting) {
+                figureObserver.unobserve(entry.target);
+                mountFigure(entry.target);
+              }
+            }
+          },
+          { rootMargin: "200px 0px" },
+        )
+      : null;
+
+  // Call after the figures are attached to the document.
+  function mountFigures(root) {
+    root.querySelectorAll(".ggb-figure[data-figure]:not([data-queued])").forEach((figure) => {
+      figure.dataset.queued = "1";
+      if (figureObserver) figureObserver.observe(figure);
+      else mountFigure(figure);
+    });
+  }
+
+  function unmountApplet(id) {
+    const api = mountedApplets.get(id);
+    mountedApplets.delete(id);
+    try {
+      api?.remove();
+    } catch {
+      /* already gone */
+    }
+  }
+
+  function unmountFigures(root) {
+    root.querySelectorAll(".ggb-figure").forEach((figure) => {
+      if (figureObserver) figureObserver.unobserve(figure);
+      figure.querySelectorAll(".ggb-host").forEach((host) => unmountApplet(host.id));
     });
   }
 
@@ -293,6 +586,7 @@
 
   function renderConversation() {
     const conv = currentConversation();
+    unmountFigures(els.messages);
     els.messages.replaceChildren();
     const messages = conv ? conv.messages : [];
     messages.forEach((message, index) => {
@@ -302,9 +596,14 @@
           : buildAssistantMessage(message, index === messages.length - 1),
       );
     });
+    mountFigures(els.messages);
+    showConversationChrome(conv);
+  }
+
+  function showConversationChrome(conv) {
     els.chatTitle.textContent = conv ? conv.title : "";
     document.title = conv ? `${conv.title} · bondus` : "bondus · Khmer Math Tutor";
-    setEmpty(messages.length === 0);
+    setEmpty(!conv || conv.messages.length === 0);
     renderRecents();
     scrollToBottom(true);
   }
@@ -425,7 +724,7 @@
     if (message.error) {
       content.textContent = message.error;
     } else {
-      content.innerHTML = renderRich(message.content || "_(empty answer)_");
+      content.innerHTML = renderRich(message.content || "_(empty answer)_", { figures: true });
     }
     node.appendChild(content);
 
@@ -468,7 +767,7 @@
     if (isLast) {
       const retry = document.createElement("button");
       retry.type = "button";
-      retry.className = "icon-btn";
+      retry.className = "icon-btn regen";
       retry.title = "Regenerate";
       retry.setAttribute("aria-label", "Regenerate answer");
       retry.innerHTML = icon("refresh");
@@ -548,10 +847,14 @@
 
   async function ask(conv, prompt, scope) {
     const history = historyFor(conv.messages);
-    conv.messages.push({ role: "user", content: prompt, scope: scope.length ? scope : undefined });
+    const question = { role: "user", content: prompt, scope: scope.length ? scope : undefined };
+    conv.messages.push(question);
     conv.updatedAt = Date.now();
     saveConversations();
-    renderConversation();
+    // Append instead of re-rendering, so graphs in earlier answers stay loaded.
+    els.messages.querySelectorAll(".regen").forEach((button) => button.remove());
+    els.messages.appendChild(buildUserMessage(question));
+    showConversationChrome(conv);
 
     const thinking = buildThinking();
     els.messages.appendChild(thinking);
@@ -603,10 +906,11 @@
     saveConversations();
     setBusy(false);
     if (conv.id === state.currentId) {
-      renderConversation();
-    } else {
-      renderRecents();
+      els.messages.appendChild(buildAssistantMessage(reply, true));
+      mountFigures(els.messages);
+      scrollToBottom();
     }
+    renderRecents();
   }
 
   async function submit(text) {
@@ -638,10 +942,8 @@
       conv.messages.pop();
     }
     const last = conv.messages.pop();
-    if (!last) {
-      renderConversation();
-      return;
-    }
+    renderConversation();
+    if (!last) return;
     await ask(conv, last.content, last.scope || []);
   }
 

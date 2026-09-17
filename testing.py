@@ -456,3 +456,11 @@ def test_image_upload_without_ocr_is_rejected(client):
     response = client.post("/api/ingest", files={"file": ("photo.jpg", b"jpeg bytes", "image/jpeg")})
     assert response.status_code == 422
     assert "Image uploads need OCR" in response.json()["detail"]
+
+
+def test_system_prompt_asks_for_geogebra_figures():
+    from prompts import SYSTEM_PROMPT
+
+    assert "```geogebra" in SYSTEM_PROMPT and "geogebra-3d" in SYSTEM_PROMPT
+    assert "ZoomIn(<xmin>, <ymin>, <xmax>, <ymax>)" in SYSTEM_PROMPT
+    assert "Execute" in SYSTEM_PROMPT  # listed among the forbidden script commands

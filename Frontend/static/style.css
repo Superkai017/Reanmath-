@@ -289,6 +289,33 @@ button:disabled { cursor: default; }
 .math-error { color: var(--danger); font-family: ui-monospace, monospace; }
 .content.error { color: var(--danger); }
 
+/* GeoGebra figures */
+.ggb-figure {
+  margin: 14px 0; border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; background: var(--bg);
+}
+.ggb-frame { width: 100%; min-height: 200px; position: relative; }
+.ggb-frame > .ggb-host { margin: 0 auto; }
+.ggb-loading {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px;
+  color: var(--text-muted); font-size: 13px; background: var(--bg-soft);
+}
+.ggb-bar {
+  display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 12px;
+  border-top: 1px solid var(--border); font-size: 12px; color: var(--text-muted);
+}
+.ggb-status { color: var(--warn); }
+.ggb-download {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 4px;
+  height: 26px; padding: 0 8px; border-radius: 8px; color: var(--text-soft);
+}
+.ggb-download:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+.ggb-download:disabled { opacity: .4; }
+.ggb-download .icon { width: 14px; height: 14px; }
+.ggb-figure.failed { padding: 10px 12px; }
+.ggb-figure.failed pre { margin: 8px 0 0; }
+.ggb-note { font-size: 12.5px; color: var(--warn); }
+
 .notice {
   display: inline-flex; align-items: center; gap: 6px; margin-top: 10px;
   font-size: 12.5px; color: var(--warn);

@@ -72,7 +72,8 @@ OUTPUT_RULES = """
    - Put every mathematical expression, however short (a single variable such
      as $x$, a number with units, an interval), in LaTeX.
    - Inline math: $...$ . Display math: $$...$$ on its own line, with a blank
-     line before and after. Do not use \\( \\), \\[ \\], or code fences for math.
+     line before and after. Do not use \\( \\), \\[ \\], or code fences for math
+     (the only code fences allowed are the GeoGebra figure blocks of rule 5).
    - Use real LaTeX commands (\\frac, \\sqrt, \\lim_{x \\to a}, \\int_a^b,
      \\vec{u}, \\overrightarrow{AB}, \\mathbb{R}, \\ln, \\cdot), never Unicode
      look-alikes such as √, ∫, ≤, → or ², and never plain-text fractions such as 1/2
@@ -102,6 +103,32 @@ OUTPUT_RULES = """
    - Check each algebraic step and the final result before replying (for
      example by substitution or differentiation). State domain conditions
      explicitly.
+
+5. Graphs and figures (GeoGebra)
+   - When a picture helps understanding (the graph of a function, a circle or
+     other conic, a tangent line, the area under a curve, vectors, a geometric
+     figure), or the student asks for a graph, curve, figure, ក្រាហ្វ or រូប,
+     add a figure: a fenced code block whose info string is `geogebra` for 2D
+     or `geogebra-3d` for 3D (surfaces, planes, lines and vectors in space).
+     The app draws it as an interactive GeoGebra graph.
+   - Inside the block write GeoGebra input-bar commands, one per line, with
+     English command names and GeoGebra syntax (x^2, sqrt(x), sin(x), ln(x),
+     pi), never LaTeX. Give objects short labels such as f, c, A, T.
+   - The last line must set the view so every object is visible:
+     ZoomIn(<xmin>, <ymin>, <xmax>, <ymax>) in 2D, or
+     ZoomIn(<xmin>, <ymin>, <zmin>, <xmax>, <ymax>, <zmax>) in 3D.
+   - Use at most 30 lines. Never use scripting commands (Execute,
+     SetClickScript, SetUpdateScript, RunClickScript, RunUpdateScript,
+     PlaySound, ReadText).
+   - Keep explaining in text as usual; do not describe the block as code.
+   - Example (the circle with centre (1, -2) and radius 3, and a parabola):
+
+```geogebra
+O = (1, -2)
+c: (x - 1)^2 + (y + 2)^2 = 9
+f(x) = x^2 - 2x
+ZoomIn(-4, -6, 6, 5)
+```
 """
 
 SYSTEM_PROMPT = TUTOR_PERSONA + OUTPUT_RULES

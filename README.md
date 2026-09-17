@@ -108,6 +108,36 @@ build and no Node.js is needed. It offers:
 - **Documents** in the sidebar to list and delete indexed documents;
 - recent conversations, saved in the browser's `localStorage`.
 
+### Graphs (GeoGebra)
+
+When a picture helps (a function's graph, a circle or other conic, a tangent,
+vectors, a 3D surface), or the student asks for one ("គូសក្រាហ្វ…"), the tutor
+adds a fenced block of GeoGebra commands:
+
+````markdown
+```geogebra
+c: (x - 1)^2 + (y + 2)^2 = 9
+f(x) = x^2 - 2x
+ZoomIn(-4, -6, 6, 5)
+```
+````
+
+The UI draws each `geogebra` (2D) or `geogebra-3d` block as an interactive
+graph with the [GeoGebra Apps API](https://geogebra.github.io/docs/reference/en/GeoGebra_Apps_API/),
+which loads from geogebra.org only when a graph first scrolls into view. The
+graph can be panned and zoomed, and **PNG** downloads it.
+
+- The final `ZoomIn(...)` sets the view. When the x and y ranges are similar,
+  one of them is widened so both axes share a scale and circles stay round.
+- Script commands (`Execute`, `SetClickScript`, `RunClickScript`, …) are
+  never run. Commands that fail are counted under the graph; hover the count
+  to see them.
+- If GeoGebra cannot load (for example offline), the commands are shown as
+  text instead.
+- Graphs need an LLM provider. In passage-only mode there are none.
+- GeoGebra is free for non-commercial use; check
+  [its license](https://www.geogebra.org/license) before commercial use.
+
 Or with Docker:
 
 ```bash
