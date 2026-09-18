@@ -112,7 +112,7 @@ class HealthResponse(BaseModel):
     embedding_loaded: bool
     khmer_segmenter: str
     ocr_enabled: bool
-    ocr_engine: Literal["gemini", "kiri"] | None = None
+    ocr_engine: Literal["gemini", "kiri", "hybrid"] | None = None
     ocr_model: str | None = None
     llm_provider: Literal["anthropic", "gemini", "groq", "none"]
     llm_model: str | None = None
