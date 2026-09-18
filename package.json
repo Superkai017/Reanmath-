@@ -1,0 +1,11 @@
+{
+  "name": "bondus",
+  "private": true,
+  "description": "Repo root shim: the real Node project lives in Frontend/. These scripts forward there so `npm run dev` works from either directory.",
+  "scripts": {
+    "dev": "cd Frontend && npm run dev",
+    "api": "uv run uvicorn src.api:app --reload --host 0.0.0.0 --port 8000",
+    "check": "cd Frontend && npm run check",
+    "install:frontend": "cd Frontend && npm install"
+  }
+}
