@@ -159,7 +159,11 @@
   // `_`, `*` and `\\` inside them survive), the HTML is sanitised, and KaTeX
   // output is spliced back in. With `figures`, ```geogebra blocks become
   // placeholders that mountFigures() turns into interactive graphs.
-  function renderRich(text, { figures = false } = {}) {
+  // `breaks` keeps a newline as <br>, which is what retrieved passages need
+  // (their line breaks come from the source document). Model answers are prose
+  // and pass breaks: false, so a wrapped sentence reflows instead of going
+  // ragged; blank lines still separate paragraphs.
+  function renderRich(text, { figures = false, breaks = true } = {}) {
     if (!librariesReady()) {
       return `<p style="white-space: pre-wrap">${escapeHtml(text)}</p>`;
     }
@@ -182,7 +186,7 @@
       formulas.push(formula);
       return `MATHPH${formulas.length - 1}XEND`;
     });
-    const html = window.DOMPurify.sanitize(window.marked.parse(masked, { gfm: true, breaks: true }));
+    const html = window.DOMPurify.sanitize(window.marked.parse(masked, { gfm: true, breaks }));
     return html
       .replace(PLACEHOLDER_RE, (_, index) => {
         const formula = formulas[Number(index)];
@@ -724,7 +728,10 @@
     if (message.error) {
       content.textContent = message.error;
     } else {
-      content.innerHTML = renderRich(message.content || "_(empty answer)_", { figures: true });
+      content.innerHTML = renderRich(message.content || "_(empty answer)_", {
+        figures: true,
+        breaks: false,
+      });
     }
     node.appendChild(content);
 
