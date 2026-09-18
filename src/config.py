@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = PROJECT_ROOT / "Frontend"
 
-LLMProvider = Literal["auto", "anthropic", "gemini", "none"]
+LLMProvider = Literal["auto", "anthropic", "gemini", "groq", "none"]
 EmbeddingBackend = Literal["sentence-transformers", "hashing"]
 KhmerSegmenterBackend = Literal["auto", "crf", "regex"]
 OCREngineSetting = Literal["auto", "gemini", "kiri"]
@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     )
     gemini_model: str = "gemini-3.8-flash"
     gemini_temperature: float = Field(0.2, ge=0.0, le=2.0)
+
+    groq_api_key: SecretStr | None = None
+    groq_model: str = "openai/gpt-oss-120b"
+    groq_temperature: float = Field(0.2, ge=0.0, le=2.0)
 
     # --- Embeddings ---
     embedding_backend: EmbeddingBackend = "sentence-transformers"
@@ -101,7 +105,7 @@ class Settings(BaseSettings):
         value = value.expanduser()
         return value if value.is_absolute() else (PROJECT_ROOT / value).resolve()
 
-    @field_validator("anthropic_api_key", "gemini_api_key", mode="after")
+    @field_validator("anthropic_api_key", "gemini_api_key", "groq_api_key", mode="after")
     @classmethod
     def _blank_key_is_none(cls, value: SecretStr | None) -> SecretStr | None:
         if value is None or not value.get_secret_value().strip():
@@ -125,13 +129,15 @@ class Settings(BaseSettings):
         return self.max_upload_mb * 1024 * 1024
 
     @property
-    def resolved_llm_provider(self) -> Literal["anthropic", "gemini", "none"]:
+    def resolved_llm_provider(self) -> Literal["anthropic", "gemini", "groq", "none"]:
         if self.llm_provider != "auto":
             return self.llm_provider
         if self.anthropic_api_key is not None:
             return "anthropic"
         if self.gemini_api_key is not None:
             return "gemini"
+        if self.groq_api_key is not None:
+            return "groq"
         return "none"
 
     @property

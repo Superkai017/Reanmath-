@@ -54,7 +54,7 @@ from src.vectorstore import EmbeddingMismatchError, InMemoryVectorStore
 
 logger = logging.getLogger("reanmath")
 
-Provider = Literal["anthropic", "gemini", "none"]
+Provider = Literal["anthropic", "gemini", "groq", "none"]
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +234,65 @@ class GeminiGenerator:
         return GeneratedAnswer(text=text, stop_reason=finish_reason, model=self.model)
 
 
+class GroqGenerator:
+    """Open models (gpt-oss, Qwen, Llama) served by Groq's OpenAI-compatible API."""
+
+    provider: Provider = "groq"
+
+    def __init__(
+        self, api_key: str, model: str, *, max_tokens: int, timeout: float, temperature: float
+    ) -> None:
+        import groq
+
+        self._groq = groq
+        self._client = groq.AsyncGroq(api_key=api_key, timeout=timeout)
+        self.model = model
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+
+    async def generate(self, *, system, history, user_message, chunks, language) -> GeneratedAnswer:
+        groq = self._groq
+        messages = [{"role": "system", "content": system}]
+        messages += [{"role": turn.role, "content": turn.content} for turn in _normalized_history(history)]
+        messages.append({"role": "user", "content": user_message})
+        try:
+            response = await self._client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_completion_tokens=self.max_tokens,
+                temperature=self.temperature,
+            )
+        except groq.AuthenticationError as exc:
+            raise LLMError(502, "Groq rejected the API key (check GROQ_API_KEY)") from exc
+        except groq.PermissionDeniedError as exc:
+            raise LLMError(502, f"Groq permission denied: {exc.message}") from exc
+        except groq.NotFoundError as exc:
+            raise LLMError(502, f"Unknown Groq model '{self.model}': {exc.message}") from exc
+        except groq.BadRequestError as exc:
+            raise LLMError(502, f"Groq rejected the request: {exc.message}") from exc
+        except groq.RateLimitError as exc:
+            raise LLMError(429, "Groq rate limit reached; retry shortly") from exc
+        except groq.InternalServerError as exc:
+            raise LLMError(503, f"Groq is temporarily unavailable ({exc.status_code})") from exc
+        except groq.APIStatusError as exc:
+            raise LLMError(502, f"Groq API error ({exc.status_code}): {exc.message}") from exc
+        except groq.APITimeoutError as exc:
+            raise LLMError(504, "Groq request timed out") from exc
+        except groq.APIConnectionError as exc:
+            raise LLMError(503, "Could not reach the Groq API") from exc
+
+        choice = response.choices[0] if response.choices else None
+        finish_reason = choice.finish_reason if choice else None
+        text = ((choice.message.content if choice else None) or "").strip()
+        if finish_reason == "content_filter":
+            raise LLMError(422, "The model declined to answer this request.")
+        if not text:
+            raise LLMError(502, f"Groq returned an empty response (finish_reason={finish_reason})")
+        if finish_reason == "length":
+            logger.warning("Groq response truncated at max_tokens=%d", self.max_tokens)
+        return GeneratedAnswer(text=text, stop_reason=finish_reason, model=response.model or self.model)
+
+
 class ExtractiveGenerator:
     """No LLM: answer with the retrieved passages themselves."""
 
@@ -266,6 +325,16 @@ def build_generator(settings: Settings) -> AnswerGenerator:
             max_tokens=settings.llm_max_tokens,
             timeout=settings.llm_timeout_seconds,
             temperature=settings.gemini_temperature,
+        )
+    if provider == "groq":
+        if settings.groq_api_key is None:
+            raise RuntimeError("LLM_PROVIDER=groq requires GROQ_API_KEY")
+        return GroqGenerator(
+            settings.groq_api_key.get_secret_value(),
+            settings.groq_model,
+            max_tokens=settings.llm_max_tokens,
+            timeout=settings.llm_timeout_seconds,
+            temperature=settings.groq_temperature,
         )
     return ExtractiveGenerator()
 

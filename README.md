@@ -214,10 +214,11 @@ important ones:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `LLM_PROVIDER` | `auto` | `anthropic`, `gemini`, `none`, or `auto` (the first provider with a key) |
+| `LLM_PROVIDER` | `auto` | `anthropic`, `gemini`, `groq`, `none`, or `auto` (the first provider with a key) |
 | `ANTHROPIC_MODEL` | `claude-opus-5` | Sent with adaptive thinking; `ANTHROPIC_EFFORT` sets the effort level |
 | `ANTHROPIC_FALLBACKS` | `true` | Server-side fallback if the main model declines a request |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` | Served by Groq (Llama or other open models); needs `GROQ_API_KEY` |
 | `EMBEDDING_BACKEND` | `sentence-transformers` | `hashing` works offline with lexical matching only |
 | `EMBEDDING_MODEL` | `intfloat/multilingual-e5-small` | Changing it requires `--reset` |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `700` / `100` | Measured in displayed characters; see [Chunking](#chunking) |
