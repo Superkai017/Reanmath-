@@ -46,7 +46,7 @@ class QueryResponse(BaseModel):
     language: Literal["km", "en"]
     grounded: bool = Field(description="True when at least one chunk passed the threshold")
     sources: list[SourceChunk]
-    provider: Literal["anthropic", "gemini", "none"]
+    provider: Literal["anthropic", "gemini", "groq", "none"]
     model: str | None = None
     stop_reason: str | None = None
     latency_ms: float
@@ -114,7 +114,7 @@ class HealthResponse(BaseModel):
     ocr_enabled: bool
     ocr_engine: Literal["gemini", "kiri"] | None = None
     ocr_model: str | None = None
-    llm_provider: Literal["anthropic", "gemini", "none"]
+    llm_provider: Literal["anthropic", "gemini", "groq", "none"]
     llm_model: str | None = None
     default_top_k: int
     default_score_threshold: float

@@ -21,6 +21,7 @@ dependencies = [
     "google-genai>=1.0",
     "kiri-ocr>=0.2.15",
     "pypdfium2>=4.30",
+    "groq>=0.30",
 ]
 
 [dependency-groups]
