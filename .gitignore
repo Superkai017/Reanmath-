@@ -36,3 +36,7 @@ tempCodeRunnerFile.py
 # Logs
 *.log
 Frontend/.vite
+
+# Root npm shim (no deps of its own)
+/node_modules/
+/package-lock.json

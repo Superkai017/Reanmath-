@@ -452,6 +452,31 @@ def test_image_upload_is_ocr_transcribed_by_kiri(store_path, tmp_path):
         assert sources[0]["text"] == "ដេរីវេនៃអនុគមន៍\nគឺជាលីមីត ។"
 
 
+def test_health_reports_the_hybrid_ocr_engine(store_path, tmp_path):
+    from src.ingestion.hybrid_ocr import HybridPageOCR
+    from src.ingestion.khmer_ocr import KiriPageOCR
+
+    class FakeKiri:
+        def __init__(self, **options):
+            pass
+
+        def process_document(self, image_path, mode="lines"):
+            return []
+
+    ocr = HybridPageOCR(
+        "key",
+        "groq-test",
+        KiriPageOCR(engine_factory=FakeKiri, cache_dir=tmp_path / "kiri"),
+        cache_dir=tmp_path / "ocr",
+        client=object(),
+    )
+    with TestClient(create_app(make_settings(store_path), ocr=ocr)) as client_app:
+        response = client_app.get("/health")
+        assert response.status_code == 200, response.text
+        health = HealthResponse.model_validate(response.json())
+        assert (health.ocr_enabled, health.ocr_engine, health.ocr_model) == (True, "hybrid", "groq-test")
+
+
 def test_image_upload_without_ocr_is_rejected(client):
     response = client.post("/api/ingest", files={"file": ("photo.jpg", b"jpeg bytes", "image/jpeg")})
     assert response.status_code == 422
