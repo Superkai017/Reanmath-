@@ -290,10 +290,37 @@ Unicode and writes formulas as LaTeX.
   `uv run python scripts/ingest_corpus.py` (use `--no-ocr` to skip OCR).
 - Chunks from OCR'd pages carry `"ocr": true` in their metadata.
 
+### Choosing an OCR engine
+
+`OCR_ENGINE` picks between three engines. They differ mainly in what they cost
+and in what they get wrong:
+
+| engine | Khmer | formulas | cost |
+| --- | --- | --- | --- |
+| `gemini` | verbatim | LaTeX | paid key; the free tier allows 20 requests/day/model |
+| `kiri` | correct spelling | **deleted** | free, local, ~10-36s/page on CPU |
+| `hybrid` | Kiri's spelling | LaTeX | free (Kiri + a Groq vision model) |
+
+`hybrid` runs Kiri first and hands its Khmer to the Groq model together with the
+page image, so the model only has to put the formulas back. That matters because
+neither free engine works alone here: Kiri deletes every formula, and a vision
+model given only the image paraphrases Khmer, invents plausible non-words and
+under-transcribes dense pages. Anchoring the model to real text fixes all three,
+and one call per page is enough - the page does not need tiling.
+
+`auto` prefers `gemini`, then `hybrid` (when `GROQ_API_KEY` is set), then `kiri`.
+
+Hybrid is free but slow: Kiri is CPU-bound and Groq's free tier rate-limits, so
+budget hours per few hundred pages. Set `OCR_REQUESTS_PER_MINUTE` to pace under
+the Groq limit rather than paying for backoff, and remember that every completed
+page is cached, so an interrupted run resumes where it left off.
+
 ## Limitations
 
 - OCR output can contain transcription mistakes, especially in dense formulas.
-  Kiri OCR drops formulas entirely by design.
+  Kiri OCR drops formulas entirely by design. `hybrid` restores the formulas but
+  still deviates from the page on a few Khmer words per dense page, so it trades
+  Gemini's accuracy for being free.
   The tutor prompt tells the model to trust correct mathematics over a passage
   that looks wrong.
 - The index is held in memory. It suits a curriculum-sized corpus of tens of

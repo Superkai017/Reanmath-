@@ -14,7 +14,7 @@ FRONTEND_DIR = PROJECT_ROOT / "Frontend"
 LLMProvider = Literal["auto", "anthropic", "gemini", "groq", "none"]
 EmbeddingBackend = Literal["sentence-transformers", "hashing"]
 KhmerSegmenterBackend = Literal["auto", "crf", "regex"]
-OCREngineSetting = Literal["auto", "gemini", "kiri"]
+OCREngineSetting = Literal["auto", "gemini", "kiri", "hybrid"]
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
 
@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     kiri_min_confidence: float = Field(0.2, ge=0.0, le=1.0)
     kiri_khmer_only: bool = True
     kiri_render_scale: float = Field(2.0, ge=0.5, le=6.0)
+
+    # Hybrid OCR (Kiri for Khmer spelling + a Groq vision model for formulas)
+    hybrid_ocr_model: str = "qwen/qwen3.8-27b"
+    hybrid_ocr_max_tokens: int = Field(8000, ge=256, le=32000)
 
     # --- Retrieval ---
     top_k: int = Field(5, ge=1, le=50)

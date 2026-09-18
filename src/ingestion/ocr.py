@@ -1,12 +1,17 @@
 """OCR for scanned PDF pages and images.
 
-Two engines share the page cache and concurrency logic in ``CachedPageOCR``:
+Three engines share the page cache and concurrency logic in ``CachedPageOCR``:
 
 * ``GeminiPageOCR`` sends each page to Gemini vision (as its embedded scan
   image, or as a one-page PDF when the page is not a single image) and gets
-  back Unicode Khmer with formulas in LaTeX.
+  back Unicode Khmer with formulas in LaTeX. Best quality, but a paid key:
+  the free tier allows only 20 requests per day per model.
 * ``KiriPageOCR`` (``src/ingestion/khmer_ocr.py``) runs the open-source Kiri
-  OCR model locally and keeps Khmer words only.
+  OCR model locally and keeps Khmer words only. Free, but it deletes formulas.
+* ``HybridPageOCR`` (``src/ingestion/hybrid_ocr.py``) feeds Kiri's Khmer to a
+  Groq vision model together with the page image, so the Khmer keeps Kiri's
+  spelling and the formulas come back as LaTeX. Free, and the default when a
+  Groq key is set but no Gemini one.
 
 Transcripts are cached on disk by content hash, so re-ingesting a document
 never pays for the same page twice.
@@ -75,7 +80,7 @@ class OCRError(RuntimeError):
     pass
 
 
-OCREngine = Literal["gemini", "kiri"]
+OCREngine = Literal["gemini", "kiri", "hybrid"]
 
 
 def page_payload(page: Any, render_scale: float = 2.0) -> PageImage:
@@ -393,8 +398,18 @@ def resolve_ocr_engine(settings: Settings) -> OCREngine | None:
         if not kiri_available():
             raise RuntimeError("OCR_ENGINE=kiri requires kiri-ocr (uv add kiri-ocr)")
         return "kiri"
+    if settings.ocr_engine == "hybrid":
+        if not kiri_available():
+            raise RuntimeError("OCR_ENGINE=hybrid requires kiri-ocr (uv add kiri-ocr)")
+        if settings.groq_api_key is None:
+            raise RuntimeError("OCR_ENGINE=hybrid requires GROQ_API_KEY")
+        return "hybrid"
     if settings.gemini_api_key is not None:
         return "gemini"
+    # Hybrid beats Kiri alone: Kiri deletes every formula, which a maths corpus
+    # cannot afford, so prefer it whenever a Groq key is also configured.
+    if kiri_available() and settings.groq_api_key is not None:
+        return "hybrid"
     if kiri_available():
         return "kiri"
     return None
@@ -410,10 +425,10 @@ def build_ocr(settings: Settings) -> CachedPageOCR | None:
             raise RuntimeError("OCR_MODE=always needs GEMINI_API_KEY or kiri-ocr")
         logger.info("No OCR engine available; scanned pages and images will not be OCR'd")
         return None
-    if engine == "kiri":
+    if engine in ("kiri", "hybrid"):
         from src.ingestion.khmer_ocr import KiriPageOCR
 
-        return KiriPageOCR(
+        kiri = KiriPageOCR(
             settings.kiri_model,
             mode=settings.ocr_mode,
             min_chars=settings.ocr_min_chars,
@@ -423,6 +438,24 @@ def build_ocr(settings: Settings) -> CachedPageOCR | None:
             min_confidence=settings.kiri_min_confidence,
             khmer_only=settings.kiri_khmer_only,
             render_scale=settings.kiri_render_scale,
+        )
+        if engine == "kiri":
+            return kiri
+
+        from src.ingestion.hybrid_ocr import HybridPageOCR
+
+        return HybridPageOCR(
+            settings.groq_api_key.get_secret_value(),
+            settings.hybrid_ocr_model,
+            kiri,
+            mode=settings.ocr_mode,
+            min_chars=settings.ocr_min_chars,
+            cache_dir=settings.ocr_cache_dir,
+            concurrency=settings.ocr_concurrency,
+            max_retries=settings.ocr_max_retries,
+            max_output_tokens=settings.hybrid_ocr_max_tokens,
+            timeout=settings.llm_timeout_seconds,
+            requests_per_minute=settings.ocr_requests_per_minute,
         )
     return GeminiPageOCR(
         settings.gemini_api_key.get_secret_value(),
